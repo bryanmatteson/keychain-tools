@@ -1,6 +1,16 @@
 # Changelog
 
-## keychain-rs 0.2.3 / kc-cli 0.3.3
+## kc-cli 0.4.0
+
+Breaking CLI changes:
+
+- `kc create` now requires an explicit output path or keychain name.
+- `-p` / `--password` now requires a value; omit the option to read from stdin
+  or prompt.
+
+The spaced and prompt-only forms of `--pkcs12-password`, `--new-password`, and
+`--to-password` remain backward compatible. `kc-cli 0.3.3` briefly shipped the
+new CLI surface under a patch version and is superseded by this release.
 
 - Add keychain-wide `extended`, `native`, and `hybrid` access-policy primitives.
 - Add `kc access set`, `show`, `clear`, `apply`, and `audit`, with explicit
@@ -11,6 +21,11 @@
 - Add public ACL inspection and private-key ACL update entrypoints.
 - Add visible uppercase metadata aliases while preserving existing lowercase
   flags and `kc trust -A`.
+
+## keychain-rs 0.2.3
+
+- Add public keychain-wide access-policy primitives.
+- Add ACL inspection and private-key ACL update entrypoints.
 
 ## keychain-rs 0.2.2 / kc-cli 0.3.2
 

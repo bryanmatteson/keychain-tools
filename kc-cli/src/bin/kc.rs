@@ -150,7 +150,6 @@ struct Pkcs12PasswordSource {
         long = "pkcs12-password",
         value_name = "PASSWORD",
         num_args = 0..=1,
-        require_equals = true,
         group = "pkcs12-password-source"
     )]
     password: Option<Option<String>>,
@@ -483,9 +482,10 @@ enum Command {
         #[arg(
             long = "to-password",
             value_name = "PASSWORD",
+            num_args = 0..=1,
             group = "to-password-source"
         )]
-        to_password: Option<String>,
+        to_password: Option<Option<String>>,
         /// Password for the destination keychain, from an environment variable
         #[arg(
             long = "to-password-env",
@@ -527,7 +527,6 @@ enum Command {
             long = "new-password",
             value_name = "PASSWORD",
             num_args = 0..=1,
-            require_equals = true,
             group = "new-password-source"
         )]
         new_password: Option<Option<String>>,
@@ -1399,18 +1398,23 @@ fn run(cli: &Cli) -> Result<()> {
             let source = resolve_keychain(&Some(source.clone()))?;
             let destination = resolve_keychain(&Some(destination.clone()))?;
             let to = PasswordSource {
-                password: to_password.clone(),
+                password: to_password.as_ref().and_then(Clone::clone),
                 password_env: to_password_env.clone(),
                 password_file: to_password_file.clone(),
                 password_gen: None,
                 password_policy: None,
+            };
+            let destination_password = if matches!(to_password, Some(None)) {
+                DestinationPassword::Prompt
+            } else {
+                DestinationPassword::Source(&to)
             };
             copy_command(
                 cli,
                 &source,
                 &destination,
                 password,
-                &to,
+                destination_password,
                 selector,
                 &trusted_applications_for_write(&destination, trust_apps, trust_requirements)?,
             )
@@ -3190,12 +3194,17 @@ fn trust_command(
 }
 
 /// `kc cp`: copy an item into another keychain.
+enum DestinationPassword<'a> {
+    Source(&'a PasswordSource),
+    Prompt,
+}
+
 fn copy_command(
     cli: &Cli,
     source: &Path,
     destination: &Path,
     from: &PasswordSource,
-    to: &PasswordSource,
+    to: DestinationPassword<'_>,
     selector: &Selector,
     trusted: &[keychain::acl::TrustedApplication],
 ) -> Result<()> {
@@ -3243,9 +3252,13 @@ fn copy_command(
     let mut target = KeychainFile::open(destination)?;
     // The destination may use a different password; when none is given, the
     // source's is tried, which is the common case.
-    let destination_password = match to.is_explicit() {
-        true => to.resolve(false)?,
-        false => source_password.clone(),
+    let destination_password = match to {
+        DestinationPassword::Prompt => {
+            rpassword::prompt_password("Destination keychain password: ")
+                .map_err(|error| Error::io("could not read the destination password", error))?
+        }
+        DestinationPassword::Source(source) if source.is_explicit() => source.resolve(false)?,
+        DestinationPassword::Source(_) => source_password.clone(),
     };
     target.unlock(destination_password.as_bytes())?;
     target.add_password(record_type, &new, secret.as_slice(), &now_timestamp())?;
@@ -3590,4 +3603,60 @@ fn four_char_code(text: Option<&str>) -> Result<Option<[u8; 4]>> {
     let mut code = *b"    ";
     code[..bytes.len()].copy_from_slice(bytes);
     Ok(Some(code))
+}
+
+#[cfg(test)]
+mod cli_compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn spaced_optional_password_values_remain_accepted() {
+        let cli =
+            Cli::try_parse_from(["kc", "passwd", "--new-password", "new-value", "login"]).unwrap();
+        let Command::Passwd { new_password, .. } = cli.command else {
+            panic!("parsed the wrong command");
+        };
+        assert_eq!(new_password, Some(Some("new-value".to_string())));
+
+        let cli = Cli::try_parse_from([
+            "kc",
+            "export",
+            "identity",
+            "--pkcs12",
+            "--pkcs12-password",
+            "bundle-value",
+            "login",
+        ])
+        .unwrap();
+        let Command::Export {
+            kind: ExportKind::Identity {
+                pkcs12_password, ..
+            },
+        } = cli.command
+        else {
+            panic!("parsed the wrong command");
+        };
+        assert_eq!(
+            pkcs12_password.password,
+            Some(Some("bundle-value".to_string()))
+        );
+    }
+
+    #[test]
+    fn destination_password_can_still_be_prompt_only() {
+        let cli = Cli::try_parse_from([
+            "kc",
+            "cp",
+            "--to-password",
+            "-a",
+            "alice",
+            "source",
+            "destination",
+        ])
+        .unwrap();
+        let Command::Cp { to_password, .. } = cli.command else {
+            panic!("parsed the wrong command");
+        };
+        assert_eq!(to_password, Some(None));
+    }
 }
