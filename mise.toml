@@ -1,0 +1,21 @@
+[tools]
+    rust = "1.97.1"
+
+[tasks."kc:install"]
+    run = "cargo install --path kc-cli --features trust-apps --force"
+
+[tasks."apwh:install"]
+    run = "cargo install --path apwh --bin apwh"
+
+[tasks.verify]
+description = "Run the complete local release gate"
+run = """
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-targets --all-features --locked
+cargo test --workspace --doc --all-features --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
+cargo build --workspace --release --all-features --locked
+cargo package -p keychain-rs --allow-dirty
+cargo package -p kc-cli --allow-dirty
+"""

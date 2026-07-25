@@ -1,0 +1,47 @@
+[package]
+    authors.workspace      = true
+    categories             = ["cryptography", "os::macos-apis", "parsing"]
+    description            = "Read and write macOS keychain files without the Security framework"
+    documentation          = "https://docs.rs/keychain-rs"
+    edition.workspace      = true
+    homepage.workspace     = true
+    keywords               = ["keychain", "macos", "passwords", "security"]
+    license.workspace      = true
+    name                   = "keychain-rs"
+    readme                 = "README.md"
+    repository.workspace   = true
+    rust-version.workspace = true
+    version.workspace      = true
+
+[lib]
+    name = "keychain"
+    path = "src/lib.rs"
+
+[dependencies]
+    # Crypto: 3DES-CBC, PBKDF2-HMAC-SHA1, and the blob signatures
+    cbc     = { version = "0.1", features = ["std"] }
+    des     = "0.8"
+    hmac    = "0.12"
+    pbkdf2  = { version = "0.12", features = ["hmac"] }
+    rand    = "0.8"
+    sha1    = "0.10"
+    zeroize = { workspace = true }
+
+    # Encoding
+    base64     = "0.22"
+    hex        = { workspace = true }
+    serde_json = { workspace = true }
+
+    # Platform
+    libc.workspace      = true
+    thiserror.workspace = true
+
+    # Optional: read an application's designated requirement straight out of its
+    # code signature, for ACL trusted-application entries. Off by default.
+    macho-codesign = { version = "0.4.0", optional = true }
+    macho-core     = { version = "0.4.0", optional = true }
+
+[features]
+    default = []
+    # Resolve trusted applications by reading an app's designated requirement.
+    trust-apps = ["dep:macho-codesign", "dep:macho-core"]

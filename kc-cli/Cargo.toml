@@ -1,0 +1,37 @@
+[package]
+    authors.workspace      = true
+    categories             = ["command-line-utilities", "cryptography", "os::macos-apis"]
+    description            = "CLI for reading and writing macOS keychain files without the Security framework"
+    documentation          = "https://docs.rs/kc-cli"
+    edition.workspace      = true
+    homepage.workspace     = true
+    keywords               = ["keychain", "macos", "passwords", "security"]
+    license.workspace      = true
+    name                   = "kc-cli"
+    readme                 = "README.md"
+    repository.workspace   = true
+    rust-version.workspace = true
+    version                = "0.2.0"
+
+[[bin]]
+    name = "kc"
+    path = "src/bin/kc.rs"
+
+[dependencies]
+    keychain-rs = { version = "0.1.0", path = "../keychain" }
+
+    # CLI
+    clap.workspace          = true
+    clap_complete.workspace = true
+    rpassword.workspace     = true
+
+    # Encoding / errors / platform used by the CLI surface
+    hex                 = { workspace = true }
+    libc.workspace      = true
+    serde_json          = { workspace = true }
+    thiserror.workspace = true
+
+[features]
+    default = []
+    # Resolve `-T <app>` by reading the app's designated requirement.
+    trust-apps = ["keychain-rs/trust-apps"]

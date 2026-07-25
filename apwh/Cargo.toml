@@ -1,0 +1,45 @@
+[package]
+    authors.workspace      = true
+    categories             = ["command-line-utilities", "cryptography", "os::macos-apis"]
+    description            = "CLI and background service for Apple Passwords on macOS"
+    edition.workspace      = true
+    homepage.workspace     = true
+    keywords               = ["icloud", "macos", "passwords", "security"]
+    license.workspace      = true
+    name                   = "apwh"
+    publish                = false
+    readme                 = "README.md"
+    repository.workspace   = true
+    rust-version.workspace = true
+    version.workspace      = true
+
+[lib]
+    name = "apwh"
+    path = "src/lib.rs"
+
+[[bin]]
+    name = "apwh"
+    path = "src/main.rs"
+
+[dependencies]
+    # Crypto
+    aes-gcm    = "0.10"
+    num-bigint = "0.4"
+    rand       = "0.8"
+    sha2       = "0.10"
+    zeroize    = { workspace = true }
+
+    # Encoding
+    base64     = "0.22"
+    hex        = { workspace = true }
+    serde      = { workspace = true }
+    serde_json = { workspace = true }
+
+    # CLI
+    clap          = { workspace = true }
+    clap_complete = { workspace = true }
+    rpassword     = { workspace = true }
+
+    # Platform
+    libc      = { workspace = true }
+    thiserror = { workspace = true }

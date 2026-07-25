@@ -1,0 +1,32 @@
+# Three crates that share a repository: `apwh` talks to Apple's Passwords helper
+# over native messaging; `keychain-rs` (in `keychain/`) and `kc-cli` read and
+# write the on-disk keychain format (library and CLI). `apwh` shares no code
+# with the other two.
+[workspace]
+    members  = ["apwh", "keychain", "kc-cli"]
+    resolver = "3"
+
+[workspace.package]
+    authors      = ["Bryan Matteson <7145232+bryanmatteson@users.noreply.github.com>"]
+    edition      = "2024"
+    homepage     = "https://github.com/bryanmatteson/keychain-tools"
+    license      = "MIT"
+    repository   = "https://github.com/bryanmatteson/keychain-tools"
+    rust-version = "1.87"
+    version      = "0.1.0"
+
+[workspace.dependencies]
+    # Shared by both crates, at one version
+    clap          = { version = "4.5", features = ["derive", "env"] }
+    clap_complete = "4.5"
+    hex           = "0.4"
+    libc          = "0.2"
+    rpassword     = "7"
+    serde         = { version = "1", features = ["derive"] }
+    serde_json    = "1"
+    thiserror     = "2"
+    zeroize       = { version = "1", features = ["derive"] }
+
+[profile.release]
+    lto   = "thin"
+    strip = "symbols"
