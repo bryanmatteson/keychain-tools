@@ -13,7 +13,7 @@
     license      = "MIT"
     repository   = "https://github.com/bryanmatteson/keychain-tools"
     rust-version = "1.87"
-    version      = "0.1.0"
+    version      = "0.2.0"
 
 [workspace.dependencies]
     # Shared by both crates, at one version

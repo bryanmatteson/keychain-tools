@@ -7,9 +7,9 @@ The companion CLI is [`kc-cli`](https://crates.io/crates/kc-cli) (binary `kc`).
 
 ```toml
 [dependencies]
-keychain-rs = "0.1"
+keychain-rs = "0.2"
 # optional: resolve ACL trusted apps from code signatures
-# keychain-rs = { version = "0.1", features = ["trust-apps"] }
+# keychain-rs = { version = "0.2", features = ["trust-apps"] }
 ```
 
 ```rust
