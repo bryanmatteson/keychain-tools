@@ -4,7 +4,7 @@
 //! goes through the Security framework.
 
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
-use std::io::{IsTerminal, Read, Write};
+use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -36,6 +36,10 @@ struct Cli {
     /// Emit JSON instead of text; the same as `--format json`
     #[arg(long, global = true, action = ArgAction::SetTrue, conflicts_with = "format")]
     json: bool,
+
+    /// Permit a keychain access policy to ask for confirmation
+    #[arg(long, global = true, action = ArgAction::SetTrue)]
+    interactive: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -90,7 +94,7 @@ struct PasswordSource {
     /// Read the password from ENV_VAR [default when omitted: KC_PASSWORD]
     #[arg(
         short = 'E',
-        short_alias = 'e',
+        visible_short_alias = 'e',
         long = "password-env",
         value_name = "ENV_VAR",
         num_args = 0..=1,
@@ -102,7 +106,7 @@ struct PasswordSource {
     /// Read the keychain password from this file, or from stdin for `-`
     #[arg(
         short = 'F',
-        short_alias = 'f',
+        visible_short_alias = 'f',
         long = "password-file",
         value_name = "FILE",
         group = "password-source"
@@ -146,6 +150,7 @@ struct Pkcs12PasswordSource {
         long = "pkcs12-password",
         value_name = "PASSWORD",
         num_args = 0..=1,
+        require_equals = true,
         group = "pkcs12-password-source"
     )]
     password: Option<Option<String>>,
@@ -521,9 +526,11 @@ enum Command {
         #[arg(
             long = "new-password",
             value_name = "PASSWORD",
+            num_args = 0..=1,
+            require_equals = true,
             group = "new-password-source"
         )]
-        new_password: Option<String>,
+        new_password: Option<Option<String>>,
         /// Generate the new password
         #[arg(long = "new-password-gen", value_name = "TEMPLATE", num_args = 0..=1, default_missing_value = "sha1", require_equals = true, group = "new-password-source")]
         new_password_gen: Option<String>,
@@ -584,6 +591,12 @@ enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+
+    /// Manage keychain-wide access policy
+    Access {
+        #[command(subcommand)]
+        action: AccessAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -617,6 +630,88 @@ enum ConfigAction {
 }
 
 #[derive(Subcommand)]
+enum AccessAction {
+    /// Show the effective policy for a keychain
+    Show { keychain: Option<PathBuf> },
+    /// Set the authoritative policy for a keychain
+    Set {
+        /// Direct-reader default
+        #[arg(long, value_enum)]
+        default: Option<CliAccessDefault>,
+        /// Enforcement mode
+        #[arg(long, value_enum)]
+        mode: Option<CliAccessMode>,
+        /// Trust this signed application in native ACLs (repeatable)
+        #[arg(short = 'T', long = "trust-app", value_name = "PATH")]
+        trust_apps: Vec<PathBuf>,
+        /// Trust PATH using a compiled requirement FILE (repeatable)
+        #[arg(long = "trust-requirement", value_name = "PATH=FILE")]
+        trust_requirements: Vec<String>,
+        /// Remove all trusted-application entries
+        #[arg(long, action = ArgAction::SetTrue)]
+        clear_trust: bool,
+        keychain: Option<PathBuf>,
+    },
+    /// Remove the configured policy for a keychain
+    Clear { keychain: Option<PathBuf> },
+    /// Project the policy onto every password and private-key item
+    Apply {
+        #[command(flatten)]
+        password: PasswordSource,
+        /// Projection target
+        #[arg(long, value_enum, default_value = "securityd")]
+        to: AccessProjection,
+        keychain: Option<PathBuf>,
+    },
+    /// Compare every native item ACL with the configured policy
+    Audit {
+        /// Policy representation to compare
+        #[arg(long, value_enum, default_value = "securityd")]
+        against: AccessProjection,
+        keychain: Option<PathBuf>,
+    },
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum CliAccessMode {
+    Extended,
+    Native,
+    Hybrid,
+}
+
+impl From<CliAccessMode> for keychain::AccessMode {
+    fn from(value: CliAccessMode) -> Self {
+        match value {
+            CliAccessMode::Extended => Self::Extended,
+            CliAccessMode::Native => Self::Native,
+            CliAccessMode::Hybrid => Self::Hybrid,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum CliAccessDefault {
+    Allow,
+    Prompt,
+    Deny,
+}
+
+impl From<CliAccessDefault> for keychain::AccessDefault {
+    fn from(value: CliAccessDefault) -> Self {
+        match value {
+            CliAccessDefault::Allow => Self::Allow,
+            CliAccessDefault::Prompt => Self::Prompt,
+            CliAccessDefault::Deny => Self::Deny,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum AccessProjection {
+    Securityd,
+}
+
+#[derive(Subcommand)]
 enum ImportKind {
     /// Import one certificate/private-key identity
     Identity {
@@ -625,7 +720,7 @@ enum ImportKind {
         #[command(flatten)]
         pkcs12_password: Pkcs12PasswordSource,
         /// Label for both records; overrides a PKCS#12 friendly name
-        #[arg(short = 'l', long)]
+        #[arg(short = 'l', visible_short_alias = 'L', long)]
         label: Option<String>,
         /// Restrict use of the private key to this application (repeatable)
         #[arg(short = 'T', long = "trust-app", value_name = "PATH")]
@@ -652,7 +747,7 @@ struct Selector {
     #[arg(short = 'a', long)]
     account: Option<String>,
     /// Service name (generic items)
-    #[arg(short = 's', long)]
+    #[arg(short = 's', visible_short_alias = 'S', long)]
     service: Option<String>,
     /// Server name (internet and AppleShare items)
     #[arg(long)]
@@ -670,13 +765,13 @@ struct Selector {
     #[arg(short = 'v', long)]
     volume: Option<String>,
     /// Item label (PrintName)
-    #[arg(long)]
+    #[arg(short = 'L', long)]
     label: Option<String>,
     /// Kind
     #[arg(long)]
     kind: Option<String>,
     /// Comment
-    #[arg(long)]
+    #[arg(short = 'C', long)]
     comment: Option<String>,
     /// Generic attribute (generic items)
     #[arg(long)]
@@ -758,7 +853,7 @@ enum RmKind {
         #[command(flatten)]
         password: PasswordSource,
         /// The identity's label (the certificate's PrintName)
-        #[arg(short = 'l', long)]
+        #[arg(short = 'l', visible_short_alias = 'L', long)]
         label: Option<String>,
         /// The identity's public key hash, as hex
         #[arg(long)]
@@ -773,7 +868,7 @@ enum RmKind {
         #[command(flatten)]
         password: PasswordSource,
         /// The certificate's label (PrintName)
-        #[arg(short = 'l', long)]
+        #[arg(short = 'l', visible_short_alias = 'L', long)]
         label: Option<String>,
         /// The certificate's public key hash, as hex
         #[arg(long)]
@@ -791,7 +886,7 @@ enum ExportKind {
         #[command(flatten)]
         password: PasswordSource,
         /// The certificate's label (PrintName)
-        #[arg(short = 'l', long)]
+        #[arg(short = 'l', visible_short_alias = 'L', long)]
         label: Option<String>,
         /// Write DER instead of PEM
         #[arg(long, action = ArgAction::SetTrue)]
@@ -806,7 +901,7 @@ enum ExportKind {
     Key {
         #[command(flatten)]
         password: PasswordSource,
-        #[arg(short = 'l', long)]
+        #[arg(short = 'l', visible_short_alias = 'L', long)]
         label: Option<String>,
         #[arg(long, action = ArgAction::SetTrue)]
         der: bool,
@@ -820,7 +915,7 @@ enum ExportKind {
     Identity {
         #[command(flatten)]
         password: PasswordSource,
-        #[arg(short = 'l', long)]
+        #[arg(short = 'l', visible_short_alias = 'L', long)]
         label: Option<String>,
         #[arg(short = 'o', long)]
         out: Option<PathBuf>,
@@ -844,10 +939,10 @@ enum AddKind {
         #[command(flatten)]
         password: PasswordSource,
         /// Account name
-        #[arg(short = 'a', long)]
+        #[arg(short = 'a', visible_short_alias = 'A', long)]
         account: String,
         /// Service name
-        #[arg(short = 's', long)]
+        #[arg(short = 's', visible_short_alias = 'S', long)]
         service: String,
         /// Generic attribute: application-defined data stored with the item
         #[arg(short = 'G', long)]
@@ -856,13 +951,13 @@ enum AddKind {
         #[arg(short = 'w', long)]
         secret: Option<String>,
         /// Item label, shown in Keychain Access [default: the service]
-        #[arg(short = 'l', long)]
+        #[arg(short = 'l', visible_short_alias = 'L', long)]
         label: Option<String>,
         /// Kind
         #[arg(short = 'D', long)]
         kind: Option<String>,
         /// Comment
-        #[arg(short = 'j', long)]
+        #[arg(short = 'j', visible_short_alias = 'C', long)]
         comment: Option<String>,
         /// Restrict decryption to this application (repeatable)
         #[arg(short = 'T', long = "trust-app", value_name = "PATH")]
@@ -879,18 +974,18 @@ enum AddKind {
     Internet {
         #[command(flatten)]
         password: PasswordSource,
-        #[arg(short = 'a', long)]
+        #[arg(short = 'a', visible_short_alias = 'A', long)]
         account: String,
         /// Server name
         #[arg(short = 's', long)]
         server: String,
         /// Security domain: the authentication realm
         /// (`-d`, as `security add-internet-password` spells it)
-        #[arg(short = 'S', short_alias = 'd', long)]
+        #[arg(short = 'S', visible_short_alias = 'd', long)]
         security_domain: Option<String>,
         #[arg(short = 'w', long)]
         secret: Option<String>,
-        #[arg(short = 'l', long)]
+        #[arg(short = 'l', visible_short_alias = 'L', long)]
         label: Option<String>,
         /// Path
         #[arg(long)]
@@ -908,7 +1003,7 @@ enum AddKind {
         #[arg(short = 'D', long)]
         kind: Option<String>,
         /// Comment
-        #[arg(short = 'j', long)]
+        #[arg(short = 'j', visible_short_alias = 'C', long)]
         comment: Option<String>,
         /// Restrict decryption to this application (repeatable)
         #[arg(short = 'T', long = "trust-app", value_name = "PATH")]
@@ -926,17 +1021,17 @@ enum AddKind {
     AppleShare {
         #[command(flatten)]
         password: PasswordSource,
-        #[arg(short = 'a', long)]
+        #[arg(short = 'a', visible_short_alias = 'A', long)]
         account: String,
         /// Volume name
         #[arg(short = 'v', long)]
         volume: String,
         #[arg(short = 'w', long)]
         secret: Option<String>,
-        #[arg(short = 'l', long)]
+        #[arg(short = 'l', visible_short_alias = 'L', long)]
         label: Option<String>,
         /// Server name
-        #[arg(short = 's', long)]
+        #[arg(short = 's', visible_short_alias = 'S', long)]
         server: Option<String>,
         /// Address
         #[arg(long)]
@@ -951,7 +1046,7 @@ enum AddKind {
         #[arg(short = 'D', long)]
         kind: Option<String>,
         /// Comment
-        #[arg(short = 'j', long)]
+        #[arg(short = 'j', visible_short_alias = 'C', long)]
         comment: Option<String>,
         /// Restrict decryption to this application (repeatable)
         #[arg(short = 'T', long = "trust-app", value_name = "PATH")]
@@ -999,7 +1094,7 @@ enum AddKind {
         #[command(flatten)]
         pkcs12_password: Pkcs12PasswordSource,
         /// Label for both records. Defaults to the certificate's common name.
-        #[arg(short = 'l', long)]
+        #[arg(short = 'l', visible_short_alias = 'L', long)]
         label: Option<String>,
         /// Restrict use of the private key to this application (repeatable)
         #[arg(short = 'T', long = "trust-app", value_name = "PATH")]
@@ -1019,21 +1114,21 @@ enum FindKind {
     Generic {
         #[command(flatten)]
         password: PasswordSource,
-        #[arg(short = 'a', long)]
+        #[arg(short = 'a', visible_short_alias = 'A', long)]
         account: Option<String>,
-        #[arg(short = 's', long)]
+        #[arg(short = 's', visible_short_alias = 'S', long)]
         service: Option<String>,
         /// Generic attribute
         #[arg(short = 'G', long)]
         generic: Option<String>,
         /// Item label (PrintName), as shown in Keychain Access
-        #[arg(short = 'l', long)]
+        #[arg(short = 'l', visible_short_alias = 'L', long)]
         label: Option<String>,
         /// Kind
         #[arg(short = 'D', long)]
         kind: Option<String>,
         /// Comment
-        #[arg(short = 'j', long)]
+        #[arg(short = 'j', visible_short_alias = 'C', long)]
         comment: Option<String>,
         /// Match any other attribute, as NAME=VALUE (repeatable). NAME is what
         /// `kc show` prints, such as `ptcl` or `atyp`.
@@ -1050,25 +1145,25 @@ enum FindKind {
     Internet {
         #[command(flatten)]
         password: PasswordSource,
-        #[arg(short = 'a', long)]
+        #[arg(short = 'a', visible_short_alias = 'A', long)]
         account: Option<String>,
         #[arg(short = 's', long)]
         server: Option<String>,
         /// Security domain (`-d`, as `security` spells it)
-        #[arg(short = 'S', short_alias = 'd', long)]
+        #[arg(short = 'S', visible_short_alias = 'd', long)]
         security_domain: Option<String>,
         #[arg(long)]
         path: Option<String>,
         #[arg(short = 'P', long)]
         port: Option<u32>,
         /// Item label (PrintName), as shown in Keychain Access
-        #[arg(short = 'l', long)]
+        #[arg(short = 'l', visible_short_alias = 'L', long)]
         label: Option<String>,
         /// Kind
         #[arg(short = 'D', long)]
         kind: Option<String>,
         /// Comment
-        #[arg(short = 'j', long)]
+        #[arg(short = 'j', visible_short_alias = 'C', long)]
         comment: Option<String>,
         /// Match any other attribute, as NAME=VALUE (repeatable). NAME is what
         /// `kc show` prints, such as `ptcl` or `atyp`.
@@ -1086,24 +1181,24 @@ enum FindKind {
     AppleShare {
         #[command(flatten)]
         password: PasswordSource,
-        #[arg(short = 'a', long)]
+        #[arg(short = 'a', visible_short_alias = 'A', long)]
         account: Option<String>,
         #[arg(short = 'v', long)]
         volume: Option<String>,
-        #[arg(short = 's', long)]
+        #[arg(short = 's', visible_short_alias = 'S', long)]
         server: Option<String>,
         #[arg(long)]
         address: Option<String>,
         #[arg(long)]
         signature: Option<String>,
         /// Item label (PrintName), as shown in Keychain Access
-        #[arg(short = 'l', long)]
+        #[arg(short = 'l', visible_short_alias = 'L', long)]
         label: Option<String>,
         /// Kind
         #[arg(short = 'D', long)]
         kind: Option<String>,
         /// Comment
-        #[arg(short = 'j', long)]
+        #[arg(short = 'j', visible_short_alias = 'C', long)]
         comment: Option<String>,
         /// Match any other attribute, as NAME=VALUE (repeatable). NAME is what
         /// `kc show` prints, such as `ptcl` or `atyp`.
@@ -1119,7 +1214,7 @@ enum FindKind {
     /// Find an identity (certificate + private key)
     Identity {
         /// Match on the identity's label (PrintName)
-        #[arg(short = 'l', long)]
+        #[arg(short = 'l', visible_short_alias = 'L', long)]
         label: Option<String>,
 
         keychain: Option<PathBuf>,
@@ -1213,6 +1308,7 @@ fn run(cli: &Cli) -> Result<()> {
             let secrets = *secrets || cli.secrets_only();
             let mut file = KeychainFile::open(&keychain)?;
             if secrets {
+                authorize_secret_access(cli, &keychain, "read secrets")?;
                 let password = password.resolve(false)?;
                 file.unlock(password.as_bytes())?;
             }
@@ -1316,7 +1412,7 @@ fn run(cli: &Cli) -> Result<()> {
                 password,
                 &to,
                 selector,
-                &trusted_applications(trust_apps, trust_requirements)?,
+                &trusted_applications_for_write(&destination, trust_apps, trust_requirements)?,
             )
         }
 
@@ -1332,7 +1428,7 @@ fn run(cli: &Cli) -> Result<()> {
             keychain,
         } => {
             let new = PasswordSource {
-                password: new_password.clone(),
+                password: new_password.as_ref().and_then(Clone::clone),
                 password_env: new_password_env.clone(),
                 password_file: new_password_file.clone(),
                 password_gen: new_password_gen.clone(),
@@ -1373,6 +1469,8 @@ fn run(cli: &Cli) -> Result<()> {
         }
 
         Command::Config { action } => config_command(cli, action),
+
+        Command::Access { action } => access_command(cli, action),
     }
 }
 
@@ -1489,6 +1587,427 @@ fn update_list_property(
     Ok(())
 }
 
+fn access_command(cli: &Cli, action: &AccessAction) -> Result<()> {
+    let mut config = config::Config::load()?;
+    match action {
+        AccessAction::Show { keychain } => {
+            let path = config.resolve(keychain.as_deref())?;
+            let policy = config.access_policy_for(&path)?;
+            let Some(policy) = policy else {
+                return Err(Error::other(format!(
+                    "{} has no configured access policy",
+                    path.display()
+                )));
+            };
+            report_access_policy(cli, &path, policy);
+            Ok(())
+        }
+        AccessAction::Set {
+            default,
+            mode,
+            trust_apps,
+            trust_requirements,
+            clear_trust,
+            keychain,
+        } => {
+            if *clear_trust && (!trust_apps.is_empty() || !trust_requirements.is_empty()) {
+                return Err(Error::other(
+                    "--clear-trust cannot be combined with trusted applications",
+                ));
+            }
+            let path = config.resolve(keychain.as_deref())?;
+            let existing = config.access_policy_for(&path)?.cloned();
+            let selector = existing.as_ref().map_or_else(
+                || {
+                    keychain.as_ref().map_or_else(
+                        || config.default.clone(),
+                        |path| path.to_string_lossy().into_owned(),
+                    )
+                },
+                |policy| policy.keychain.clone(),
+            );
+            let mut policy = existing.unwrap_or(config::ConfiguredAccessPolicy {
+                keychain: selector,
+                mode: keychain::AccessMode::Hybrid,
+                default: keychain::AccessDefault::Prompt,
+                trust_apps: Vec::new(),
+                trust_requirements: Vec::new(),
+            });
+            if let Some(mode) = mode {
+                policy.mode = (*mode).into();
+            }
+            if let Some(default) = default {
+                policy.default = (*default).into();
+            }
+            if *clear_trust {
+                policy.trust_apps.clear();
+                policy.trust_requirements.clear();
+            } else if !trust_apps.is_empty() || !trust_requirements.is_empty() {
+                policy.trust_apps.clone_from(trust_apps);
+                policy.trust_requirements = trust_requirements
+                    .iter()
+                    .map(|spec| requirement_source(spec))
+                    .collect::<Result<_>>()?;
+            }
+            config.set_access_policy(policy.clone());
+            let saved = config.save()?;
+            if cli.is_json() {
+                println!(
+                    "{}",
+                    keychain::output::pretty(&serde_json::json!({
+                        "ok": true,
+                        "path": saved,
+                        "keychain": path,
+                        "policy": access_policy_json(&policy),
+                    }))
+                );
+            } else {
+                println!("access policy saved: {}", saved.display());
+                report_access_policy(cli, &path, &policy);
+            }
+            Ok(())
+        }
+        AccessAction::Clear { keychain } => {
+            let path = config.resolve(keychain.as_deref())?;
+            let selector = config
+                .access_policy_for(&path)?
+                .map(|policy| policy.keychain.clone())
+                .ok_or_else(|| {
+                    Error::other(format!(
+                        "{} has no configured access policy",
+                        path.display()
+                    ))
+                })?;
+            config.clear_access_policy(&selector);
+            let saved = config.save()?;
+            report(
+                cli,
+                &format!("access policy removed: {}", path.display()),
+                || {
+                    serde_json::json!({
+                        "ok": true,
+                        "path": saved,
+                        "keychain": path,
+                        "removed": true,
+                    })
+                },
+            );
+            Ok(())
+        }
+        AccessAction::Apply {
+            password,
+            to: AccessProjection::Securityd,
+            keychain,
+        } => apply_access_policy(cli, &config, keychain.as_deref(), password),
+        AccessAction::Audit {
+            against: AccessProjection::Securityd,
+            keychain,
+        } => audit_access_policy(cli, &config, keychain.as_deref()),
+    }
+}
+
+fn report_access_policy(cli: &Cli, path: &Path, policy: &config::ConfiguredAccessPolicy) {
+    if cli.is_json() {
+        println!(
+            "{}",
+            keychain::output::pretty(&serde_json::json!({
+                "ok": true,
+                "keychain": path,
+                "policy": access_policy_json(policy),
+            }))
+        );
+    } else {
+        println!(
+            "{}",
+            keychain::output::field_list(&[
+                ("keychain", path.display().to_string()),
+                ("selector", policy.keychain.clone()),
+                ("mode", config::access_mode_name(policy.mode).to_string()),
+                (
+                    "default",
+                    config::access_default_name(policy.default).to_string()
+                ),
+                (
+                    "trusted apps",
+                    (policy.trust_apps.len() + policy.trust_requirements.len()).to_string()
+                ),
+            ])
+        );
+        for path in &policy.trust_apps {
+            println!("trust-app: {}", path.display());
+        }
+        for source in &policy.trust_requirements {
+            println!(
+                "trust-requirement: {}={}",
+                source.application.display(),
+                source.file.display()
+            );
+        }
+    }
+}
+
+fn access_policy_json(policy: &config::ConfiguredAccessPolicy) -> serde_json::Value {
+    serde_json::json!({
+        "selector": policy.keychain,
+        "mode": config::access_mode_name(policy.mode),
+        "default": config::access_default_name(policy.default),
+        "trust_apps": policy.trust_apps,
+        "trust_requirements": policy.trust_requirements.iter().map(|source| {
+            serde_json::json!({
+                "application": source.application,
+                "file": source.file,
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn requirement_source(spec: &str) -> Result<config::RequirementSource> {
+    let (application, file) = spec
+        .split_once('=')
+        .ok_or_else(|| Error::other(format!("expected PATH=FILE, got {spec:?}")))?;
+    if application.is_empty() || file.is_empty() {
+        return Err(Error::other(format!("expected PATH=FILE, got {spec:?}")));
+    }
+    Ok(config::RequirementSource {
+        application: PathBuf::from(application),
+        file: PathBuf::from(file),
+    })
+}
+
+fn resolved_access_policy(
+    config: &config::Config,
+    path: &Path,
+) -> Result<Option<keychain::AccessPolicy>> {
+    config
+        .access_policy_for(path)?
+        .map(|policy| {
+            Ok(keychain::AccessPolicy {
+                mode: policy.mode,
+                default: policy.default,
+                trusted_applications: configured_trusted_applications(policy)?,
+            })
+        })
+        .transpose()
+}
+
+fn configured_trusted_applications(
+    policy: &config::ConfiguredAccessPolicy,
+) -> Result<Vec<keychain::TrustedApplication>> {
+    let mut applications =
+        Vec::with_capacity(policy.trust_apps.len() + policy.trust_requirements.len());
+    for path in &policy.trust_apps {
+        applications.push(keychain::requirement::for_application(path)?);
+    }
+    for source in &policy.trust_requirements {
+        let blob =
+            std::fs::read(&source.file).map_err(|error| Error::reading(&source.file, error))?;
+        applications.push(keychain::requirement::from_blob(
+            source.application.to_string_lossy(),
+            blob,
+        )?);
+    }
+    Ok(applications)
+}
+
+fn apply_access_policy(
+    cli: &Cli,
+    config: &config::Config,
+    keychain: Option<&Path>,
+    password: &PasswordSource,
+) -> Result<()> {
+    let path = config.resolve(keychain)?;
+    let policy = resolved_access_policy(config, &path)?.ok_or_else(|| {
+        Error::other(format!(
+            "{} has no configured access policy",
+            path.display()
+        ))
+    })?;
+    if policy.default == keychain::AccessDefault::Deny {
+        return Err(Error::other(
+            "securityd ACLs cannot represent an unconditional deny policy",
+        ));
+    }
+    if policy.default == keychain::AccessDefault::Prompt && policy.trusted_applications.is_empty() {
+        return Err(Error::other(
+            "a prompt policy needs at least one trusted application before it can be projected to securityd",
+        ));
+    }
+
+    let mut file = KeychainFile::open(&path)?;
+    let password = password.resolve(false)?;
+    file.unlock(password.as_bytes())?;
+    let password_items: Vec<_> = file
+        .items()
+        .iter()
+        .map(|item| (item.record_type, item.number()))
+        .collect();
+    let private_keys: Vec<_> = file
+        .records_of_type(RecordType::PRIVATE_KEY)
+        .iter()
+        .map(|record| record.number)
+        .collect();
+    for (record_type, number) in &password_items {
+        file.set_item_trust(*record_type, *number, policy.native_trusted_applications())?;
+    }
+    for number in &private_keys {
+        file.set_private_key_trust(*number, policy.native_trusted_applications())?;
+    }
+    file.save(&path)?;
+
+    let count = password_items.len() + private_keys.len();
+    report(
+        cli,
+        &format!("applied access policy to {count} item(s)"),
+        || {
+            serde_json::json!({
+                "ok": true,
+                "keychain": path,
+                "target": "securityd",
+                "items_updated": count,
+            })
+        },
+    );
+    Ok(())
+}
+
+fn audit_access_policy(cli: &Cli, config: &config::Config, keychain: Option<&Path>) -> Result<()> {
+    let path = config.resolve(keychain)?;
+    let policy = resolved_access_policy(config, &path)?.ok_or_else(|| {
+        Error::other(format!(
+            "{} has no configured access policy",
+            path.display()
+        ))
+    })?;
+    let file = KeychainFile::open(&path)?;
+    let expected = policy.native_trusted_applications();
+    let mut total = 0usize;
+    let mut matching = 0usize;
+    let mut unknown = 0usize;
+
+    for item in file.items() {
+        total += 1;
+        match file.item_trusted_applications(item.record_type, item.number())? {
+            Some(actual) if actual == expected => matching += 1,
+            Some(_) => {}
+            None => unknown += 1,
+        }
+    }
+    for record in file.records_of_type(RecordType::PRIVATE_KEY) {
+        let number = record.number;
+        total += 1;
+        match file.private_key_trusted_applications(number)? {
+            Some(actual) if actual == expected => matching += 1,
+            Some(_) => {}
+            None => unknown += 1,
+        }
+    }
+    let ok = matching == total;
+    if cli.is_json() {
+        println!(
+            "{}",
+            keychain::output::pretty(&serde_json::json!({
+                "ok": ok,
+                "keychain": path,
+                "against": "securityd",
+                "items": total,
+                "matching": matching,
+                "mismatched": total - matching - unknown,
+                "unknown": unknown,
+            }))
+        );
+    } else {
+        println!(
+            "{}",
+            keychain::output::field_list(&[
+                ("keychain", path.display().to_string()),
+                ("items", total.to_string()),
+                ("matching", matching.to_string()),
+                ("mismatched", (total - matching - unknown).to_string()),
+                ("unknown", unknown.to_string()),
+            ])
+        );
+    }
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::other(
+            "native item ACLs do not match the keychain policy",
+        ))
+    }
+}
+
+fn authorize_secret_access(cli: &Cli, keychain: &Path, operation: &str) -> Result<()> {
+    let config = config::Config::load()?;
+    let Some(policy) = config.access_policy_for(keychain)? else {
+        return Ok(());
+    };
+    let decision = keychain::AccessPolicy {
+        mode: policy.mode,
+        default: policy.default,
+        trusted_applications: Vec::new(),
+    }
+    .direct_decision();
+    match decision {
+        keychain::AccessDecision::Allow => Ok(()),
+        keychain::AccessDecision::Deny => Err(Error::other(format!(
+            "access policy denies permission to {operation} from {}",
+            keychain.display()
+        ))),
+        keychain::AccessDecision::Prompt if !cli.interactive => Err(Error::other(format!(
+            "access policy requires confirmation to {operation}; rerun with --interactive"
+        ))),
+        keychain::AccessDecision::Prompt => prompt_access(keychain, operation),
+    }
+}
+
+fn prompt_access(keychain: &Path, operation: &str) -> Result<()> {
+    let mut tty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .map_err(|error| {
+            Error::io(
+                "access confirmation requires an interactive terminal",
+                error,
+            )
+        })?;
+    write!(
+        tty,
+        "Allow kc to {operation} from {}? [y/N] ",
+        keychain.display()
+    )
+    .and_then(|()| tty.flush())
+    .map_err(|error| Error::io("could not write the access confirmation", error))?;
+    let mut answer = String::new();
+    BufReader::new(tty)
+        .read_line(&mut answer)
+        .map_err(|error| Error::io("could not read the access confirmation", error))?;
+    if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        Ok(())
+    } else {
+        Err(Error::other("access was not approved"))
+    }
+}
+
+fn trusted_applications_for_write(
+    keychain: &Path,
+    paths: &[PathBuf],
+    requirements: &[String],
+) -> Result<Vec<keychain::TrustedApplication>> {
+    if !paths.is_empty() || !requirements.is_empty() {
+        return trusted_applications(paths, requirements);
+    }
+    let config = config::Config::load()?;
+    let Some(policy) = resolved_access_policy(&config, keychain)? else {
+        return Ok(Vec::new());
+    };
+    if policy.mode.projects_native() {
+        Ok(policy.trusted_applications)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
 fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
     match kind {
         AddKind::Generic {
@@ -1512,7 +2031,11 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
                 generic: generic.as_ref().map(|text| text.as_bytes().to_vec()),
                 description: kind.clone(),
                 comment: comment.clone(),
-                trusted_applications: trusted_applications(trust_apps, trust_requirements)?,
+                trusted_applications: trusted_applications_for_write(
+                    &keychain,
+                    trust_apps,
+                    trust_requirements,
+                )?,
                 ..NewItem::default()
             };
             add(
@@ -1552,7 +2075,11 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
                 port: *port,
                 description: kind.clone(),
                 comment: comment.clone(),
-                trusted_applications: trusted_applications(trust_apps, trust_requirements)?,
+                trusted_applications: trusted_applications_for_write(
+                    &keychain,
+                    trust_apps,
+                    trust_requirements,
+                )?,
                 protocol: four_char_code(protocol.as_deref())?,
                 // `security` stores kSecAuthenticationTypeDefault when none is
                 // given, and this attribute is part of the relation's unique
@@ -1597,7 +2124,11 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
                 protocol: four_char_code(protocol.as_deref())?,
                 description: kind.clone(),
                 comment: comment.clone(),
-                trusted_applications: trusted_applications(trust_apps, trust_requirements)?,
+                trusted_applications: trusted_applications_for_write(
+                    &keychain,
+                    trust_apps,
+                    trust_requirements,
+                )?,
                 ..NewItem::default()
             };
             add(
@@ -1622,7 +2153,8 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
             keychain,
         } => {
             let keychain = resolve_keychain(keychain)?;
-            let trusted = trusted_applications(trust_apps, trust_requirements)?;
+            let trusted =
+                trusted_applications_for_write(&keychain, trust_apps, trust_requirements)?;
             let identity = if let Some(path) = pkcs12 {
                 identity_from_file(path, pkcs12_password, label.clone(), trusted)?
             } else {
@@ -1662,7 +2194,8 @@ fn import_command(cli: &Cli, kind: &ImportKind) -> Result<()> {
             keychain,
         } => {
             let keychain = resolve_keychain(keychain)?;
-            let trusted = trusted_applications(trust_apps, trust_requirements)?;
+            let trusted =
+                trusted_applications_for_write(&keychain, trust_apps, trust_requirements)?;
             let identity = identity_from_file(input, pkcs12_password, label.clone(), trusted)?;
             add_identity(cli, &keychain, password, &identity)
         }
@@ -1920,6 +2453,7 @@ fn find(
     let secret_only = secret_only || cli.secrets_only();
     let unlocked = match password.resolve_optional(secret_only)? {
         Some(password) => {
+            authorize_secret_access(cli, keychain, "read a secret")?;
             file.unlock(password.as_bytes())?;
             true
         }
@@ -2225,6 +2759,7 @@ fn list_keys(cli: &Cli, keychain: &Path, password: &PasswordSource) -> Result<()
 /// Check what a reader can check: blob signatures, key unwrapping, that every
 /// item's key is present, and that every index region was understood.
 fn verify(cli: &Cli, keychain: &Path, password: &PasswordSource) -> Result<()> {
+    authorize_secret_access(cli, keychain, "verify item secrets")?;
     let mut file = KeychainFile::open(keychain)?;
     let password = password.resolve(false)?;
     let blob = file.db_blob()?;
@@ -2669,6 +3204,7 @@ fn copy_command(
     }
 
     let mut origin = KeychainFile::open(source)?;
+    authorize_secret_access(cli, source, "copy a secret")?;
     let source_password = from.resolve(false)?;
     origin.unlock(source_password.as_bytes())?;
 
@@ -2753,6 +3289,7 @@ fn export_command(cli: &Cli, kind: &ExportKind) -> Result<()> {
         } => {
             let keychain = resolve_keychain(keychain)?;
             let mut file = KeychainFile::open(&keychain)?;
+            authorize_secret_access(cli, &keychain, "export a private key")?;
             let password = password.resolve(false)?;
             file.unlock(password.as_bytes())?;
 
@@ -2780,6 +3317,7 @@ fn export_command(cli: &Cli, kind: &ExportKind) -> Result<()> {
         } => {
             let keychain = resolve_keychain(keychain)?;
             let mut file = KeychainFile::open(&keychain)?;
+            authorize_secret_access(cli, &keychain, "export an identity")?;
             let password = password.resolve(false)?;
             file.unlock(password.as_bytes())?;
 

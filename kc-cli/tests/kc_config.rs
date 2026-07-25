@@ -131,3 +131,120 @@ fn search_paths_can_be_appended_and_prepended() {
     let last = text.find("search-path \"last\"").unwrap();
     assert!(first < middle && middle < last);
 }
+
+#[test]
+fn keychain_access_policy_can_be_saved_projected_and_audited() {
+    let home = TempDir::new("access-policy-home");
+    let home_text = home.path().to_str().unwrap();
+    let keychain = home.join("policy.keychain");
+    let keychain_text = keychain.to_str().unwrap();
+    let requirement_file = home.join("security.req");
+    std::fs::write(
+        &requirement_file,
+        designated_requirement("/usr/bin/security"),
+    )
+    .unwrap();
+    let requirement = format!("/usr/bin/security={}", requirement_file.to_str().unwrap());
+
+    for args in [
+        vec!["create", "-p", "pw", keychain_text],
+        vec![
+            "add",
+            "generic",
+            "-p",
+            "pw",
+            "-A",
+            "alice",
+            "-S",
+            "svc",
+            "-w",
+            "secret",
+            keychain_text,
+        ],
+        vec![
+            "access",
+            "set",
+            "--mode",
+            "hybrid",
+            "--default",
+            "prompt",
+            "--trust-requirement",
+            &requirement,
+            keychain_text,
+        ],
+    ] {
+        let output = kc_with_env(&args, &[("HOME", home_text)]);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let before = kc_with_env(&["access", "audit", keychain_text], &[("HOME", home_text)]);
+    assert!(!before.status.success(), "an unprojected ACL matched");
+
+    let applied = kc_with_env(
+        &["access", "apply", "-p", "pw", keychain_text],
+        &[("HOME", home_text)],
+    );
+    assert!(
+        applied.status.success(),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    let audited = kc_with_env(&["access", "audit", keychain_text], &[("HOME", home_text)]);
+    assert!(
+        audited.status.success(),
+        "{}",
+        String::from_utf8_lossy(&audited.stderr)
+    );
+
+    let inherited = kc_with_env(
+        &[
+            "add",
+            "generic",
+            "-p",
+            "pw",
+            "-A",
+            "bob",
+            "-S",
+            "other",
+            "-w",
+            "second",
+            keychain_text,
+        ],
+        &[("HOME", home_text)],
+    );
+    assert!(
+        inherited.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inherited.stderr)
+    );
+    let audited = kc_with_env(&["access", "audit", keychain_text], &[("HOME", home_text)]);
+    assert!(
+        audited.status.success(),
+        "a new item did not inherit policy: {}",
+        String::from_utf8_lossy(&audited.stderr)
+    );
+
+    let denied = kc_with_env(
+        &[
+            "find",
+            "generic",
+            "-p",
+            "pw",
+            "-A",
+            "alice",
+            "-w",
+            keychain_text,
+        ],
+        &[("HOME", home_text)],
+    );
+    assert!(!denied.status.success());
+    assert!(
+        String::from_utf8_lossy(&denied.stderr).contains("rerun with --interactive"),
+        "{}",
+        String::from_utf8_lossy(&denied.stderr)
+    );
+}

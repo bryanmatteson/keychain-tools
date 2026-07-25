@@ -375,6 +375,31 @@ fn generated_password_policies_control_character_classes() {
 }
 
 #[test]
+fn uppercase_metadata_aliases_are_first_class() {
+    let dir = TempDir::new("options-metadata-aliases");
+    let path = dir.join("aliases.keychain");
+    let path = path.to_str().unwrap();
+    kc_ok(&["create", "-p", "pw", path], None);
+    kc_ok(
+        &[
+            "add", "generic", "-p", "pw", "-A", "alice", "-S", "svc", "-L", "label", "-C",
+            "comment", "-w", "secret", path,
+        ],
+        None,
+    );
+    assert_eq!(
+        kc_ok(
+            &[
+                "find", "generic", "-p", "pw", "-A", "alice", "-S", "svc", "-L", "label", "-C",
+                "comment", "-w", path,
+            ],
+            None,
+        ),
+        "secret"
+    );
+}
+
+#[test]
 fn format_secret_prints_the_secret_and_nothing_else() {
     let dir = TempDir::new("options-format");
     let keychain = populated(&dir, "pw");

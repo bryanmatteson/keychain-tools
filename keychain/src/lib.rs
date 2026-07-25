@@ -13,6 +13,7 @@
 //!
 //! See `README.md` for the format notes and the security caveats.
 
+pub mod access;
 pub mod acl;
 pub mod apple_schema;
 pub mod crypto;
@@ -31,8 +32,10 @@ pub mod schema;
 pub mod secret;
 pub mod write;
 
+pub use access::{AccessDecision, AccessDefault, AccessMode, AccessPolicy};
+pub use acl::{AclBlob, TrustedApplication};
 pub use db::{Info, Item, KeychainFile, Query};
-pub use edit::{ItemChanges, Settings};
+pub use edit::{ItemChanges, Settings, StoredIdentity};
 pub use error::{Error, Result};
 pub use format::{Keychain, Record, Value};
 pub use locator::{KeychainLocator, SYSTEM_KEYCHAIN};
@@ -41,7 +44,7 @@ pub use pkcs12::{
     is_combined_pem,
 };
 pub use schema::{AttributeFormat, RecordType, Schema};
-pub use write::{CreateOptions, NewItem, create};
+pub use write::{CreateOptions, NewIdentity, NewItem, create, now_timestamp};
 
 /// Reading an application's designated requirement out of its code signature.
 ///

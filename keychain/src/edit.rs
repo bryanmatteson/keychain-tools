@@ -362,9 +362,6 @@ impl KeychainFile {
         record_number: u32,
         trusted: &[TrustedApplication],
     ) -> Result<()> {
-        let keys = self.keys().ok_or(Error::Locked)?;
-        let signing_key = SecretBytes::new(keys.signing_key.as_slice());
-
         let item = self
             .items_of_type(record_type)
             .into_iter()
@@ -376,14 +373,95 @@ impl KeychainFile {
             .ok_or_else(|| Error::MissingItemKey {
                 label: hex::encode(label),
             })?;
+        let name = item.label().unwrap_or_default();
+        self.set_key_record_trust(RecordType::SYMMETRIC_KEY, number, &name, trusted)
+    }
+
+    /// Rewrite the access control of a stored private key.
+    ///
+    /// This is the identity equivalent of [`KeychainFile::set_item_trust`].
+    pub fn set_private_key_trust(
+        &mut self,
+        record_number: u32,
+        trusted: &[TrustedApplication],
+    ) -> Result<()> {
+        let record = self
+            .records_of_type(RecordType::PRIVATE_KEY)
+            .into_iter()
+            .find(|record| record.number == record_number)
+            .ok_or(Error::NoSuchItem)?;
+        let name = self
+            .schema()
+            .attribute(RecordType::PRIVATE_KEY, record, "PrintName")
+            .and_then(Value::as_bytes)
+            .map(|bytes| String::from_utf8_lossy(crate::format::trim_nul(bytes)).into_owned())
+            .unwrap_or_default();
+        self.set_key_record_trust(RecordType::PRIVATE_KEY, record_number, &name, trusted)
+    }
+
+    /// Native ACL applications for a password item.
+    ///
+    /// `None` means the ACL was not in the canonical form this library models;
+    /// an empty vector means any application.
+    pub fn item_trusted_applications(
+        &self,
+        record_type: RecordType,
+        record_number: u32,
+    ) -> Result<Option<Vec<TrustedApplication>>> {
+        let item = self
+            .items_of_type(record_type)
+            .into_iter()
+            .find(|item| item.number() == record_number)
+            .ok_or(Error::NoSuchItem)?;
+        let label = Ssgp::parse(&item.record.key_data)?.label;
+        let number = self
+            .key_record_number(&label)
+            .ok_or_else(|| Error::MissingItemKey {
+                label: hex::encode(label),
+            })?;
+        self.key_record_trusted_applications(RecordType::SYMMETRIC_KEY, number)
+    }
+
+    /// Native ACL applications for a stored private key.
+    pub fn private_key_trusted_applications(
+        &self,
+        record_number: u32,
+    ) -> Result<Option<Vec<TrustedApplication>>> {
+        self.key_record_trusted_applications(RecordType::PRIVATE_KEY, record_number)
+    }
+
+    fn key_record_trusted_applications(
+        &self,
+        record_type: RecordType,
+        record_number: u32,
+    ) -> Result<Option<Vec<TrustedApplication>>> {
+        let blob = self
+            .records_of_type(record_type)
+            .into_iter()
+            .find(|record| record.number == record_number)
+            .map(|record| crypto::KeyBlob::parse(&record.key_data))
+            .transpose()?
+            .ok_or(Error::NoSuchItem)?;
+        Ok(blob.public_acl.trusted_applications().map(<[_]>::to_vec))
+    }
+
+    fn set_key_record_trust(
+        &mut self,
+        record_type: RecordType,
+        record_number: u32,
+        fallback_name: &str,
+        trusted: &[TrustedApplication],
+    ) -> Result<()> {
+        let keys = self.keys().ok_or(Error::Locked)?;
+        let signing_key = SecretBytes::new(keys.signing_key.as_slice());
 
         // The ACL is replaced with this crate's canonical form, so an ACL it
         // could not parse must not be touched: rewriting one would silently
         // drop whatever macOS put there.
         let existing = self
-            .records_of_type(RecordType::SYMMETRIC_KEY)
+            .records_of_type(record_type)
             .into_iter()
-            .find(|record| record.number == number)
+            .find(|record| record.number == record_number)
             .map(|record| crypto::KeyBlob::parse(&record.key_data))
             .transpose()?
             .ok_or(Error::NoSuchItem)?;
@@ -399,8 +477,7 @@ impl KeychainFile {
             .public_acl
             .item_name()
             .map(str::to_string)
-            .or_else(|| item.label())
-            .unwrap_or_default();
+            .unwrap_or_else(|| fallback_name.to_string());
 
         let acl = if trusted.is_empty() {
             AclBlob::for_item(&name)
@@ -411,11 +488,11 @@ impl KeychainFile {
         let keychain = self.keychain_mut();
         keychain.bump_commit_version();
         let table = keychain
-            .table_mut(RecordType::SYMMETRIC_KEY)
-            .ok_or(Error::MissingTable("CSSM_DL_DB_RECORD_SYMMETRIC_KEY"))?;
+            .table_mut(record_type)
+            .ok_or(Error::MissingTable("key record table"))?;
         let record = table
             .records_mut()
-            .find(|record| record.number == number)
+            .find(|record| record.number == record_number)
             .ok_or(Error::NoSuchItem)?;
 
         let mut blob = crypto::KeyBlob::parse(&record.key_data)?;

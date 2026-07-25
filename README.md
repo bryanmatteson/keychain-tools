@@ -7,7 +7,7 @@ Rust tools for macOS passwords and keychain files. They share a repository;
 | --- | --- |
 | [**`keychain-rs`**](keychain/README.md) | Library for the on-disk `.keychain` format: no `securityd`, no Security framework, no entitlements. Published to crates.io. |
 | [**`kc-cli`**](kc-cli/README.md) | CLI (`kc`) built on `keychain-rs`. Creates, reads, and writes keychains Apple's `security` accepts. Published to crates.io. |
-| [**`apwh`**](apwh/README.md) | Apple Passwords (iCloud Keychain) via the native-messaging helper. GitHub only — not on crates.io. Blocked on macOS 26 by Apple's parent launch constraint. |
+| [**`apwh`**](apwh/README.md) | Apple Passwords (iCloud Keychain) via the native-messaging helper discovered from Chrome/Firefox's manifest and launched over stdio. GitHub only — not on crates.io. Blocked on macOS 26 by Apple's parent launch constraint. |
 
 ## Install
 

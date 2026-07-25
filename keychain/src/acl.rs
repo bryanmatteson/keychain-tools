@@ -309,6 +309,23 @@ impl AclBlob {
             .collect()
     }
 
+    /// Trusted applications from the entry that governs item use.
+    ///
+    /// `None` means the ACL does not have the canonical item-access entry this
+    /// library understands. `Some([])` means any application.
+    pub fn trusted_applications(&self) -> Option<&[TrustedApplication]> {
+        self.entries.iter().find_map(|entry| {
+            if entry.authorization.as_ref() != Some(&Authorization::ItemAccess) {
+                return None;
+            }
+            match entry.subject.as_ref()? {
+                Subject::Any => Some(&[][..]),
+                Subject::TrustedApplications(applications) => Some(applications.as_slice()),
+                Subject::Unknown(_) => None,
+            }
+        })
+    }
+
     pub fn parse(data: &[u8]) -> Result<Self> {
         let mut reader = WordReader { data, at: 0 };
         let owner = reader.entry(EntryKind::Owner)?;

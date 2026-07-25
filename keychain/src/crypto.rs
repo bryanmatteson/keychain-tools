@@ -454,6 +454,17 @@ impl PublicAcl {
             Self::Raw(_) => Vec::new(),
         }
     }
+
+    /// Applications from the canonical item-access entry.
+    ///
+    /// `None` means the ACL was not understood; an empty slice means any
+    /// application.
+    pub fn trusted_applications(&self) -> Option<&[crate::acl::TrustedApplication]> {
+        match self {
+            Self::Parsed(blob) => blob.trusted_applications(),
+            Self::Raw(_) => None,
+        }
+    }
 }
 
 impl KeyBlob {

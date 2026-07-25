@@ -3,10 +3,10 @@
 A Rust CLI and background service for Apple Passwords (iCloud Keychain) on macOS,
 built on the same native-messaging helper that browser extensions use.
 
-This is one of the two crates in the repository; the other is
-[`keychain-rs`](../keychain/README.md) / [`kc-cli`](../kc-cli/README.md), which
-read and write `.keychain` files directly and
-shares no code with this one.
+This is one of three crates in the repository. The other two are
+[`keychain-rs`](../keychain/README.md) and [`kc-cli`](../kc-cli/README.md),
+which read and write `.keychain` files directly and share no code with this
+one.
 
 Protocol reconstructed from [`apw`](https://github.com/bendews/apw) (Deno/TypeScript)
 and [`icloud-passwords-firefox`](https://github.com/au2001/icloud-passwords-firefox).
@@ -35,6 +35,11 @@ over stdio, which has two consequences that shape everything here:
   cannot both own the helper and be short-lived.
 - **A session that dies with the process.** The SRP handshake — including the
   six-digit PIN macOS puts on screen — is per helper process.
+
+`apwh` reads `/Library/Google/Chrome/NativeMessagingHosts/com.apple.passwordmanager.json`
+(or Firefox's equivalent), launches its `path` directly, and exchanges
+length-prefixed JSON over the helper's stdin/stdout. Chrome itself—headless or
+otherwise—is not part of the protocol.
 
 So `apwh` is split in two:
 

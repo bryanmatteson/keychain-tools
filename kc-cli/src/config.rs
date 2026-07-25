@@ -2,12 +2,30 @@
 
 use std::path::{Path, PathBuf};
 
-use keychain::{Error, KeychainLocator, Result};
+use keychain::{AccessDefault, AccessMode, Error, KeychainLocator, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub default: String,
     pub search_paths: Vec<PathBuf>,
+    pub access: Vec<ConfiguredAccessPolicy>,
+}
+
+/// A requirement blob source persisted for later native ACL projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequirementSource {
+    pub application: PathBuf,
+    pub file: PathBuf,
+}
+
+/// One named keychain's policy as stored in `keychain.kdl`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfiguredAccessPolicy {
+    pub keychain: String,
+    pub mode: AccessMode,
+    pub default: AccessDefault,
+    pub trust_apps: Vec<PathBuf>,
+    pub trust_requirements: Vec<RequirementSource>,
 }
 
 impl Default for Config {
@@ -15,6 +33,7 @@ impl Default for Config {
         Self {
             default: "login".to_string(),
             search_paths: Vec::new(),
+            access: Vec::new(),
         }
     }
 }
@@ -81,6 +100,36 @@ impl Config {
         Ok(KeychainLocator::new(self.all_search_paths()?)?.resolve(input))
     }
 
+    /// The policy whose keychain selector resolves to `path`.
+    pub fn access_policy_for(&self, path: &Path) -> Result<Option<&ConfiguredAccessPolicy>> {
+        for policy in &self.access {
+            if self.resolve(Some(Path::new(&policy.keychain)))? == path {
+                return Ok(Some(policy));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Replace a keychain's policy, preserving the order of other declarations.
+    pub fn set_access_policy(&mut self, policy: ConfiguredAccessPolicy) {
+        if let Some(existing) = self
+            .access
+            .iter_mut()
+            .find(|existing| existing.keychain == policy.keychain)
+        {
+            *existing = policy;
+        } else {
+            self.access.push(policy);
+        }
+    }
+
+    /// Remove a keychain's policy.
+    pub fn clear_access_policy(&mut self, keychain: &str) -> bool {
+        let before = self.access.len();
+        self.access.retain(|policy| policy.keychain != keychain);
+        self.access.len() != before
+    }
+
     pub fn render(&self) -> String {
         let mut text = format!(
             "version 1\ndefault {}\n",
@@ -92,7 +141,50 @@ impl Config {
                 serde_json::to_string(&path.to_string_lossy()).expect("paths serialize")
             ));
         }
+        for policy in &self.access {
+            text.push_str(&format!(
+                "access {} mode={} default={}\n",
+                string(&policy.keychain),
+                string(access_mode_name(policy.mode)),
+                string(access_default_name(policy.default)),
+            ));
+            for path in &policy.trust_apps {
+                text.push_str(&format!(
+                    "trust-app {} {}\n",
+                    string(&policy.keychain),
+                    string(&path.to_string_lossy()),
+                ));
+            }
+            for source in &policy.trust_requirements {
+                text.push_str(&format!(
+                    "trust-requirement {} {} {}\n",
+                    string(&policy.keychain),
+                    string(&source.application.to_string_lossy()),
+                    string(&source.file.to_string_lossy()),
+                ));
+            }
+        }
         text
+    }
+}
+
+fn string(value: &str) -> String {
+    serde_json::to_string(value).expect("strings serialize")
+}
+
+pub fn access_mode_name(mode: AccessMode) -> &'static str {
+    match mode {
+        AccessMode::Extended => "extended",
+        AccessMode::Native => "native",
+        AccessMode::Hybrid => "hybrid",
+    }
+}
+
+pub fn access_default_name(default: AccessDefault) -> &'static str {
+    match default {
+        AccessDefault::Allow => "allow",
+        AccessDefault::Prompt => "prompt",
+        AccessDefault::Deny => "deny",
     }
 }
 
@@ -114,35 +206,200 @@ fn expand_tilde(path: &Path) -> Result<PathBuf> {
 fn parse(text: &str) -> std::result::Result<Config, String> {
     let mut config = Config::default();
     for (index, raw) in text.lines().enumerate() {
-        let line = raw.split("//").next().unwrap_or(raw).trim();
+        let line = strip_comment(raw).trim();
         if line.is_empty() {
             continue;
         }
-        let (node, value) = line
-            .split_once(char::is_whitespace)
-            .ok_or_else(|| format!("line {} has no value", index + 1))?;
-        let value = value.trim();
+        let tokens = tokens(line, index + 1)?;
+        let Some(node) = tokens.first().map(String::as_str) else {
+            continue;
+        };
+        let values = &tokens[1..];
         match node {
-            "version" if value == "1" => {}
+            "version" if values == ["1"] => {}
             "version" => {
                 return Err(format!(
-                    "line {} has unsupported version {value}",
+                    "line {} has unsupported version {}",
+                    index + 1,
+                    values.join(" ")
+                ));
+            }
+            "default" if values.len() == 1 => config.default.clone_from(&values[0]),
+            "search-path" if values.len() == 1 => {
+                config.search_paths.push(PathBuf::from(&values[0]))
+            }
+            "access" => {
+                let keychain = positional(values, 0, index + 1, "access keychain")?;
+                let mode = property(values, "mode", index + 1)?
+                    .map(parse_access_mode)
+                    .transpose()?
+                    .unwrap_or(AccessMode::Extended);
+                let default = property(values, "default", index + 1)?
+                    .map(parse_access_default)
+                    .transpose()?
+                    .unwrap_or(AccessDefault::Prompt);
+                if config
+                    .access
+                    .iter()
+                    .any(|policy| policy.keychain == keychain)
+                {
+                    return Err(format!(
+                        "line {} repeats access policy for {keychain:?}",
+                        index + 1
+                    ));
+                }
+                config.access.push(ConfiguredAccessPolicy {
+                    keychain,
+                    mode,
+                    default,
+                    trust_apps: Vec::new(),
+                    trust_requirements: Vec::new(),
+                });
+            }
+            "trust-app" => {
+                let keychain = positional(values, 0, index + 1, "trust-app keychain")?;
+                let path = positional(values, 1, index + 1, "trusted application path")?;
+                access_mut(&mut config, &keychain, index + 1)?
+                    .trust_apps
+                    .push(PathBuf::from(path));
+            }
+            "trust-requirement" => {
+                let keychain = positional(values, 0, index + 1, "trust-requirement keychain")?;
+                let application = positional(values, 1, index + 1, "trusted application path")?;
+                let file = positional(values, 2, index + 1, "requirement file")?;
+                access_mut(&mut config, &keychain, index + 1)?
+                    .trust_requirements
+                    .push(RequirementSource {
+                        application: PathBuf::from(application),
+                        file: PathBuf::from(file),
+                    });
+            }
+            "default" | "search-path" => {
+                return Err(format!(
+                    "line {} has the wrong number of values for {node}",
                     index + 1
                 ));
             }
-            "default" => config.default = parse_string(value, index + 1)?,
-            "search-path" => config
-                .search_paths
-                .push(PathBuf::from(parse_string(value, index + 1)?)),
             _ => return Err(format!("line {} has unknown node {node:?}", index + 1)),
         }
     }
     Ok(config)
 }
 
-fn parse_string(value: &str, line: usize) -> std::result::Result<String, String> {
-    serde_json::from_str(value)
-        .map_err(|error| format!("line {line} has an invalid string: {error}"))
+fn access_mut<'a>(
+    config: &'a mut Config,
+    keychain: &str,
+    line: usize,
+) -> std::result::Result<&'a mut ConfiguredAccessPolicy, String> {
+    config
+        .access
+        .iter_mut()
+        .find(|policy| policy.keychain == keychain)
+        .ok_or_else(|| {
+            format!("line {line} adds trust to {keychain:?} before declaring its access policy")
+        })
+}
+
+fn parse_access_mode(value: String) -> std::result::Result<AccessMode, String> {
+    match value.as_str() {
+        "extended" => Ok(AccessMode::Extended),
+        "native" => Ok(AccessMode::Native),
+        "hybrid" => Ok(AccessMode::Hybrid),
+        _ => Err(format!(
+            "unknown access mode {value:?}; expected extended, native, or hybrid"
+        )),
+    }
+}
+
+fn parse_access_default(value: String) -> std::result::Result<AccessDefault, String> {
+    match value.as_str() {
+        "allow" => Ok(AccessDefault::Allow),
+        "prompt" => Ok(AccessDefault::Prompt),
+        "deny" => Ok(AccessDefault::Deny),
+        _ => Err(format!(
+            "unknown access default {value:?}; expected allow, prompt, or deny"
+        )),
+    }
+}
+
+fn positional(
+    values: &[String],
+    index: usize,
+    line: usize,
+    description: &str,
+) -> std::result::Result<String, String> {
+    values
+        .iter()
+        .filter(|value| !value.contains('='))
+        .nth(index)
+        .cloned()
+        .ok_or_else(|| format!("line {line} has no {description}"))
+}
+
+fn property(
+    values: &[String],
+    name: &str,
+    line: usize,
+) -> std::result::Result<Option<String>, String> {
+    let prefix = format!("{name}=");
+    let found: Vec<_> = values
+        .iter()
+        .filter_map(|value| value.strip_prefix(&prefix))
+        .collect();
+    match found.as_slice() {
+        [] => Ok(None),
+        [value] => Ok(Some((*value).to_string())),
+        _ => Err(format!("line {line} repeats property {name:?}")),
+    }
+}
+
+fn strip_comment(line: &str) -> &str {
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, character) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            '/' if !quoted && line[index..].starts_with("//") => return &line[..index],
+            _ => {}
+        }
+    }
+    line
+}
+
+fn tokens(line: &str, number: usize) -> std::result::Result<Vec<String>, String> {
+    let mut output = Vec::new();
+    let mut token = String::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    for character in line.chars() {
+        if escaped {
+            token.push(character);
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            character if character.is_whitespace() && !quoted => {
+                if !token.is_empty() {
+                    output.push(std::mem::take(&mut token));
+                }
+            }
+            _ => token.push(character),
+        }
+    }
+    if quoted || escaped {
+        return Err(format!("line {number} has an unterminated string"));
+    }
+    if !token.is_empty() {
+        output.push(token);
+    }
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -154,6 +411,16 @@ mod tests {
         let config = Config {
             default: "machina".to_string(),
             search_paths: vec![PathBuf::from("~/keys"), PathBuf::from("/Volumes/keys")],
+            access: vec![ConfiguredAccessPolicy {
+                keychain: "machina".to_string(),
+                mode: AccessMode::Hybrid,
+                default: AccessDefault::Prompt,
+                trust_apps: vec![PathBuf::from("/usr/bin/security")],
+                trust_requirements: vec![RequirementSource {
+                    application: PathBuf::from("/Applications/Example.app"),
+                    file: PathBuf::from("~/requirements/example.bin"),
+                }],
+            }],
         };
         assert_eq!(parse(&config.render()).unwrap(), config);
     }

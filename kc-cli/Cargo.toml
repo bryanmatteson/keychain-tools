@@ -11,14 +11,14 @@
     readme                 = "README.md"
     repository.workspace   = true
     rust-version.workspace = true
-    version                = "0.3.2"
+    version                = "0.3.3"
 
 [[bin]]
     name = "kc"
     path = "src/bin/kc.rs"
 
 [dependencies]
-    keychain-rs = { version = "0.2.2", path = "../keychain" }
+    keychain-rs = { version = "0.2.3", path = "../keychain" }
 
     # CLI
     clap.workspace          = true

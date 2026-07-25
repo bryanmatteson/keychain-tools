@@ -84,6 +84,12 @@ kc config set keychains.default KEYCHAIN
 kc config set search.paths PATH [PATH...]
 kc config append search.paths PATH [PATH...]
 kc config prepend search.paths PATH [PATH...]
+kc access show [KEYCHAIN]
+kc access set [--mode extended|native|hybrid] [--default allow|prompt|deny]
+              [-T APP]... [--trust-requirement PATH=FILE]... [KEYCHAIN]
+kc access clear [KEYCHAIN]
+kc access apply [--to securityd] [KEYCHAIN]
+kc access audit [--against securityd] [KEYCHAIN]
 kc completions SHELL
 ```
 
@@ -103,6 +109,11 @@ names an item, in one place:
 [--security-domain REALM] [--path PATH] [-P PORT] [-v VOLUME] [--label NAME]
 [--kind KIND] [--comment TEXT] [--generic BYTES] [--attr NAME=VALUE]...
 ```
+
+For add/find metadata, `-A`, `-S`, `-L`, and `-C` are visible aliases for
+account, service, label, and comment. The lowercase `-a`, `-s`, `-l`, and `-j`
+forms remain compatible. Selector-based commands use `-L` and `-C`; `kc trust`
+keeps `-A` for its established `--any` meaning.
 
 A mutation with no selector is refused rather than applied to whatever happens
 to be first, and one that matches more than one item is refused unless the
@@ -133,6 +144,42 @@ the way `security delete-certificate` does, while `kc rm identity` removes both.
 `kc passwd` keeps the database's master keys and re-seals them under the new
 password with a fresh salt and IV, so every existing item stays readable. It
 refuses before writing anything if the old password is wrong.
+
+### Keychain-wide access policy
+
+Apple's database format stores ACLs per item, not on the keychain itself.
+`kc access` provides the higher-level keychain policy and can project it onto
+every password and private-key item:
+
+```bash
+kc access set --mode hybrid --default prompt \
+  -T /usr/bin/security machina
+kc access apply --to securityd -E KC_PASSWORD machina
+kc access audit --against securityd machina
+```
+
+Modes separate the two enforcement systems:
+
+- `extended` makes direct `kc` secret reads honor `allow`, `prompt`, or `deny`.
+- `native` inherits trusted applications on new items for `securityd`.
+- `hybrid` does both.
+
+A `prompt` decision is refused in scripts unless `--interactive` is present;
+then `kc` asks through `/dev/tty`. Native ACLs authenticate signed applications
+using their designated requirements. A shell invocation cannot securely attest
+which application called it, so `kc` never treats a process path as a signed
+caller identity.
+
+`access apply` is explicit because it rewrites existing item ACLs. Apple's
+native ACL can represent “any application” or trusted applications with a
+prompt for other callers; it cannot represent an unconditional deny, so a
+`deny` policy remains an extended-policy feature and is rejected for native
+projection.
+
+The policy is stored alongside keychain search settings in
+`~/.config/keychain.kdl`. Per-item `kc trust` remains available as an override.
+New items inherit native/hybrid policy unless explicit `-T` or
+`--trust-requirement` options are supplied.
 
 ### Supplying the keychain password
 
@@ -193,8 +240,8 @@ DER representation or PEM with a `PKCS12` label. `kc export identity` writes
 combined PEM by default; `--pkcs12` writes encrypted DER PKCS#12, and
 `--pkcs12 --pem` writes the same container in PEM form.
 
-PKCS#12 support is provided by `keychain-rs 0.2.2`; publish that crate before
-packaging `kc-cli 0.3.2`, then run `mise run kc-cli:package`.
+PKCS#12 support is provided by `keychain-rs`; publish that crate before
+packaging `kc-cli`, then run `mise run kc-cli:package`.
 
 ### Output formats
 
