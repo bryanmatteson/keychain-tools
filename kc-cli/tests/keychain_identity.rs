@@ -8,8 +8,9 @@
 mod common;
 
 use common::{
-    TempDir, create_with_security, generate_identity, import_identity_with_security, kc, kc_ok,
-    security, security_available, security_ok,
+    TempDir, create_with_security, generate_identity, generate_pkcs12,
+    import_identity_with_security, kc, kc_ok, kc_with_env, security, security_available,
+    security_ok,
 };
 
 use keychain::crypto::KeyBlob;
@@ -344,4 +345,242 @@ fn a_certificate_that_is_not_a_certificate_is_refused() {
             .is_none()
     );
     let _ = security(&["delete-keychain", as_str]);
+}
+
+#[test]
+fn pkcs12_import_and_export_round_trip_through_openssl() {
+    let dir = TempDir::new("identity-pkcs12");
+    let (certificate, key) = generate_identity(&dir, "id", "kc pkcs12 round trip");
+    let source = generate_pkcs12(
+        &dir,
+        "source",
+        &certificate,
+        &key,
+        "friendly identity",
+        "bundle-in",
+    );
+    let first = dir.join("first.keychain");
+    let second = dir.join("second.keychain");
+    let exported = dir.join("exported.p12");
+
+    let created = kc_with_env(
+        &[
+            "create",
+            "--password-env",
+            "KC_PASSWORD",
+            first.to_str().unwrap(),
+        ],
+        &[("KC_PASSWORD", "keychain")],
+    );
+    assert!(created.status.success());
+    let imported = kc_with_env(
+        &[
+            "import",
+            "identity",
+            "--password-env",
+            "KC_PASSWORD",
+            "--pkcs12-password-env",
+            "P12_PASSWORD",
+            source.to_str().unwrap(),
+            first.to_str().unwrap(),
+        ],
+        &[("KC_PASSWORD", "keychain"), ("P12_PASSWORD", "bundle-in")],
+    );
+    assert!(
+        imported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+
+    let exported_result = kc_with_env(
+        &[
+            "export",
+            "identity",
+            "--password-env",
+            "KC_PASSWORD",
+            "--pkcs12",
+            "--pkcs12-password-env",
+            "P12_PASSWORD",
+            "--out",
+            exported.to_str().unwrap(),
+            first.to_str().unwrap(),
+        ],
+        &[("KC_PASSWORD", "keychain"), ("P12_PASSWORD", "bundle-out")],
+    );
+    assert!(
+        exported_result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported_result.stderr)
+    );
+
+    let openssl = std::process::Command::new("/usr/bin/openssl")
+        .args([
+            "pkcs12",
+            "-in",
+            exported.to_str().unwrap(),
+            "-passin",
+            "pass:bundle-out",
+            "-info",
+            "-noout",
+        ])
+        .output()
+        .expect("run openssl");
+    assert!(
+        openssl.status.success(),
+        "openssl rejected the export: {}",
+        String::from_utf8_lossy(&openssl.stderr)
+    );
+
+    let created = kc_with_env(
+        &[
+            "create",
+            "--password-env",
+            "KC_PASSWORD",
+            second.to_str().unwrap(),
+        ],
+        &[("KC_PASSWORD", "keychain")],
+    );
+    assert!(created.status.success());
+    let reimported = kc_with_env(
+        &[
+            "add",
+            "identity",
+            "--password-env",
+            "KC_PASSWORD",
+            "--pkcs12",
+            exported.to_str().unwrap(),
+            "--pkcs12-password-env",
+            "P12_PASSWORD",
+            second.to_str().unwrap(),
+        ],
+        &[("KC_PASSWORD", "keychain"), ("P12_PASSWORD", "bundle-out")],
+    );
+    assert!(
+        reimported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reimported.stderr)
+    );
+
+    let mut first_file = KeychainFile::open(&first).unwrap();
+    let mut second_file = KeychainFile::open(&second).unwrap();
+    first_file.unlock(b"keychain").unwrap();
+    second_file.unlock(b"keychain").unwrap();
+    let first_identity = first_file.identities().remove(0);
+    let second_identity = second_file.identities().remove(0);
+    assert_eq!(first_identity.label, Some("friendly identity".to_string()));
+    assert_eq!(second_identity.label, first_identity.label);
+    assert_eq!(second_identity.certificate, first_identity.certificate);
+    let first_key = first_file
+        .private_key_pkcs8(first_identity.private_key_record.unwrap())
+        .unwrap();
+    let second_key = second_file
+        .private_key_pkcs8(second_identity.private_key_record.unwrap())
+        .unwrap();
+    assert_eq!(second_key.as_slice(), first_key.as_slice());
+}
+
+#[test]
+fn pkcs12_pem_is_accepted_and_can_be_exported() {
+    let dir = TempDir::new("identity-pkcs12-pem");
+    let (certificate, key) = generate_identity(&dir, "id", "kc pkcs12 pem");
+    let der = generate_pkcs12(&dir, "source", &certificate, &key, "pem identity", "p12");
+    let pem = dir.join("source.pem");
+    std::fs::write(
+        &pem,
+        keychain::der::to_pem(
+            keychain::der::PEM_PKCS12,
+            &std::fs::read(&der).expect("read p12"),
+        ),
+    )
+    .expect("write PEM");
+    let keychain_path = dir.join("pem.keychain");
+    let exported = dir.join("exported.pem");
+
+    let created = kc_with_env(
+        &[
+            "create",
+            "--password-env",
+            "KC_PASSWORD",
+            keychain_path.to_str().unwrap(),
+        ],
+        &[("KC_PASSWORD", "kc")],
+    );
+    assert!(created.status.success());
+    let imported = kc_with_env(
+        &[
+            "import",
+            "identity",
+            "--password-env",
+            "KC_PASSWORD",
+            "--pkcs12-password-env",
+            "P12_PASSWORD",
+            pem.to_str().unwrap(),
+            keychain_path.to_str().unwrap(),
+        ],
+        &[("KC_PASSWORD", "kc"), ("P12_PASSWORD", "p12")],
+    );
+    assert!(
+        imported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+
+    let result = kc_with_env(
+        &[
+            "export",
+            "identity",
+            "--password-env",
+            "KC_PASSWORD",
+            "--pkcs12",
+            "--pem",
+            "--pkcs12-password-env",
+            "P12_PASSWORD",
+            "-o",
+            exported.to_str().unwrap(),
+            keychain_path.to_str().unwrap(),
+        ],
+        &[("KC_PASSWORD", "kc"), ("P12_PASSWORD", "new")],
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let output = std::fs::read_to_string(exported).expect("read PEM export");
+    assert!(output.starts_with("-----BEGIN PKCS12-----"));
+    let decoded = keychain::der::pem_or_der(output.as_bytes()).expect("decode PEM");
+    let identity = keychain::pkcs12::decode(&decoded, "new").expect("decode exported PKCS#12");
+    assert_eq!(identity.friendly_name.as_deref(), Some("pem identity"));
+}
+
+#[test]
+fn combined_pem_identity_imports_without_a_bundle_password() {
+    let dir = TempDir::new("identity-combined-pem");
+    let (certificate, key) = generate_identity(&dir, "id", "kc combined pem");
+    let combined = dir.join("identity.pem");
+    let mut bytes = std::fs::read(certificate).expect("read certificate");
+    bytes.extend_from_slice(&std::fs::read(key).expect("read key"));
+    std::fs::write(&combined, bytes).expect("write combined PEM");
+    let path = dir.join("combined.keychain");
+
+    kc_ok(&["create", path.to_str().unwrap()], Some("pw"));
+    let output = kc(
+        &[
+            "import",
+            "identity",
+            combined.to_str().unwrap(),
+            path.to_str().unwrap(),
+        ],
+        Some("pw"),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let file = KeychainFile::open(path).expect("open imported keychain");
+    assert_eq!(
+        file.identities()[0].label.as_deref(),
+        Some("kc combined pem")
+    );
 }

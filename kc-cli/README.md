@@ -51,7 +51,8 @@ kc add internet    -a ACCOUNT -s SERVER [-w SECRET] [-l LABEL] [-D KIND]
 kc add appleshare  -a ACCOUNT -v VOLUME [-w SECRET] [-l LABEL] [-D KIND]
                    [-j COMMENT] [-s SERVER] [--address ADDR]
                    [--signature SIG] [-T APP]... FILE
-kc add identity    -c CERT -k KEY [-l LABEL] [-T APP]... FILE
+kc add identity    (-c CERT -k KEY | --pkcs12 PFX) [-l LABEL] [-T APP]... FILE
+kc import identity INPUT [-l LABEL] [-T APP]... FILE
 
 kc find generic    [-a ACCOUNT] [-s SERVICE] [-l LABEL] [-D KIND]
                    [-j COMMENT] [-G GENERIC] [--attr NAME=VALUE]... [-w] FILE
@@ -74,7 +75,7 @@ kc cp              SELECTOR [--to-password-env NAME] [--to-password-file FILE]
                    [-T APP]... SOURCE DESTINATION
 kc export cert     [-l LABEL] [--der] [-o FILE] KEYCHAIN
 kc export key      [-l LABEL] [--der] [-o FILE] KEYCHAIN
-kc export identity [-l LABEL] [-o FILE] KEYCHAIN
+kc export identity [-l LABEL] [-o FILE] [--pkcs12 [--pem]] KEYCHAIN
 kc passwd          [--new-password-env NAME] [--new-password-file FILE] FILE
 kc settings        [-t SECONDS | --no-timeout] [-l | --no-lock-on-sleep] FILE
 
@@ -153,17 +154,31 @@ an integer. Repeat the option to require multiple attributes.
 
 ### Adding identities
 
-`kc add identity` accepts a certificate and an unencrypted PKCS#8 private key
-in PEM or DER form. It does not parse PKCS#12 bundles directly. A bundle can be
-split first:
+`kc add identity` accepts either a certificate plus an unencrypted PKCS#8
+private key in PEM or DER form, or a PKCS#12/PFX container holding one identity:
 
 ```bash
-openssl pkcs12 -in bundle.p12 -nokeys -out cert.pem
-openssl pkcs12 -in bundle.p12 -nocerts -nodes |
-  openssl pkcs8 -topk8 -nocrypt -out key.pem
-
 kc add identity -c cert.pem -k key.pem ~/demo.keychain
+kc add identity --pkcs12 identity.p12 ~/demo.keychain
+kc add identity --pkcs12 identity.p12 \
+  --pkcs12-password-env P12_PASSWORD ~/demo.keychain
 ```
+
+The PKCS#12 password can come from
+`--pkcs12-password-env NAME` or `--pkcs12-password-file FILE`; otherwise it is
+read from a pipe or prompted for. It is never accepted directly in `argv`.
+Containers with multiple identities are refused rather than choosing one
+implicitly. The bundle's friendly name becomes the identity label unless
+`--label` overrides it.
+
+`kc import identity` auto-detects a combined certificate/private-key PEM
+document or a PKCS#12 container. PKCS#12 input may be its conventional binary
+DER representation or PEM with a `PKCS12` label. `kc export identity` writes
+combined PEM by default; `--pkcs12` writes encrypted DER PKCS#12, and
+`--pkcs12 --pem` writes the same container in PEM form.
+
+PKCS#12 support is provided by `keychain-rs 0.2.1`; publish that crate before
+packaging `kc-cli 0.3.1`, then run `mise run kc-cli:package`.
 
 ### Output formats
 

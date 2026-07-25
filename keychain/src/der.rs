@@ -392,6 +392,9 @@ pub const PEM_CERTIFICATE: &str = "CERTIFICATE";
 /// The PEM label for an unencrypted PKCS#8 private key.
 pub const PEM_PRIVATE_KEY: &str = "PRIVATE KEY";
 
+/// The PEM label for a PKCS#12/PFX container.
+pub const PEM_PKCS12: &str = "PKCS12";
+
 #[cfg(test)]
 mod tests {
     use super::*;

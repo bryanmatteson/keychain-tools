@@ -17,5 +17,8 @@ cargo test --workspace --doc --all-features --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
 cargo build --workspace --release --all-features --locked
 cargo package -p keychain-rs --allow-dirty
-cargo package -p kc-cli --allow-dirty
 """
+
+[tasks."kc-cli:package"]
+description = "Package kc-cli after publishing its keychain-rs dependency"
+run = "cargo package -p kc-cli --allow-dirty"

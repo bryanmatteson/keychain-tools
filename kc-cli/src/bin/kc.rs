@@ -96,6 +96,52 @@ struct PasswordSource {
     password_file: Option<PathBuf>,
 }
 
+/// Where a PKCS#12 container password comes from.
+#[derive(Args, Clone, Debug, Default)]
+struct Pkcs12PasswordSource {
+    /// Read the PKCS#12 password from this environment variable
+    #[arg(
+        id = "pkcs12-password-env",
+        long = "pkcs12-password-env",
+        value_name = "NAME",
+        group = "pkcs12-password-source"
+    )]
+    password_env: Option<String>,
+
+    /// Read the PKCS#12 password from this file, or from stdin for `-`
+    #[arg(
+        id = "pkcs12-password-file",
+        long = "pkcs12-password-file",
+        value_name = "FILE",
+        group = "pkcs12-password-source"
+    )]
+    password_file: Option<PathBuf>,
+}
+
+impl Pkcs12PasswordSource {
+    fn resolve(&self) -> Result<String> {
+        if let Some(name) = &self.password_env {
+            let value = std::env::var(name)
+                .map_err(|_| Error::other(format!("the environment variable {name} is not set")))?;
+            return Ok(first_line(&value).to_string());
+        }
+        if let Some(path) = &self.password_file {
+            if path.as_os_str() == "-" {
+                return read_password_line();
+            }
+            let text = std::fs::read_to_string(path).map_err(|source| {
+                Error::io(format!("could not read {}", path.display()), source)
+            })?;
+            return Ok(first_line(&text).to_string());
+        }
+        if !std::io::stdin().is_terminal() {
+            return read_password_line();
+        }
+        rpassword::prompt_password("PKCS#12 password: ")
+            .map_err(|source| Error::io("could not read the PKCS#12 password", source))
+    }
+}
+
 impl PasswordSource {
     /// True when a source was named, rather than left to a pipe or a prompt.
     fn is_explicit(&self) -> bool {
@@ -217,6 +263,12 @@ enum Command {
     Add {
         #[command(subcommand)]
         kind: AddKind,
+    },
+
+    /// Import an identity from a PEM, DER PKCS#12, or PEM PKCS#12 file
+    Import {
+        #[command(subcommand)]
+        kind: ImportKind,
     },
 
     /// Find an item
@@ -353,6 +405,29 @@ enum Command {
     Completions {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
+    },
+}
+
+#[derive(Subcommand)]
+enum ImportKind {
+    /// Import one certificate/private-key identity
+    Identity {
+        #[command(flatten)]
+        password: PasswordSource,
+        #[command(flatten)]
+        pkcs12_password: Pkcs12PasswordSource,
+        /// Label for both records; overrides a PKCS#12 friendly name
+        #[arg(short = 'l', long)]
+        label: Option<String>,
+        /// Restrict use of the private key to this application (repeatable)
+        #[arg(short = 'T', long = "trust-app", value_name = "PATH")]
+        trust_apps: Vec<PathBuf>,
+        /// Restrict use using a PATH=REQUIREMENT_FILE pair (repeatable)
+        #[arg(long = "trust-requirement", value_name = "PATH=FILE")]
+        trust_requirements: Vec<String>,
+        /// Combined PEM identity or PKCS#12/PFX file, in PEM or DER form
+        input: PathBuf,
+        keychain: PathBuf,
     },
 }
 
@@ -516,7 +591,6 @@ enum ExportKind {
         /// Write to this file instead of stdout
         #[arg(short = 'o', long)]
         out: Option<PathBuf>,
-
         keychain: PathBuf,
     },
 
@@ -542,6 +616,14 @@ enum ExportKind {
         label: Option<String>,
         #[arg(short = 'o', long)]
         out: Option<PathBuf>,
+        /// Export an encrypted PKCS#12/PFX container instead of combined PEM
+        #[arg(long, action = ArgAction::SetTrue)]
+        pkcs12: bool,
+        /// PEM-wrap PKCS#12 output instead of writing binary DER
+        #[arg(long, action = ArgAction::SetTrue, requires = "pkcs12")]
+        pem: bool,
+        #[command(flatten)]
+        pkcs12_password: Pkcs12PasswordSource,
 
         keychain: PathBuf,
     },
@@ -679,11 +761,35 @@ enum AddKind {
         #[command(flatten)]
         password: PasswordSource,
         /// Certificate file, PEM or DER
-        #[arg(short = 'c', long = "cert", value_name = "FILE")]
-        certificate: PathBuf,
+        #[arg(
+            short = 'c',
+            long = "cert",
+            value_name = "FILE",
+            required_unless_present = "pkcs12",
+            requires = "key",
+            conflicts_with = "pkcs12"
+        )]
+        certificate: Option<PathBuf>,
         /// Private key file: an unencrypted PKCS#8 `PrivateKeyInfo`, PEM or DER
-        #[arg(short = 'k', long = "key", value_name = "FILE")]
-        key: PathBuf,
+        #[arg(
+            short = 'k',
+            long = "key",
+            value_name = "FILE",
+            required_unless_present = "pkcs12",
+            requires = "certificate",
+            conflicts_with = "pkcs12"
+        )]
+        key: Option<PathBuf>,
+        /// PKCS#12/PFX file containing one identity
+        #[arg(
+            long = "pkcs12",
+            visible_alias = "pfx",
+            value_name = "FILE",
+            required_unless_present_all = ["certificate", "key"]
+        )]
+        pkcs12: Option<PathBuf>,
+        #[command(flatten)]
+        pkcs12_password: Pkcs12PasswordSource,
         /// Label for both records. Defaults to the certificate's common name.
         #[arg(short = 'l', long)]
         label: Option<String>,
@@ -897,6 +1003,8 @@ fn run(cli: &Cli) -> Result<()> {
         Command::Verify { password, keychain } => verify(cli, keychain, password),
 
         Command::Add { kind } => add_command(cli, kind),
+
+        Command::Import { kind } => import_command(cli, kind),
 
         Command::Find { kind } => find_command(cli, kind),
 
@@ -1145,20 +1253,84 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
             password,
             certificate,
             key,
+            pkcs12,
+            pkcs12_password,
             label,
             trust_apps,
             trust_requirements,
             keychain,
         } => {
-            let identity = NewIdentity {
-                certificate: read_der(certificate, keychain::der::PEM_CERTIFICATE)?,
-                private_key: read_der(key, keychain::der::PEM_PRIVATE_KEY)?,
-                label: label.clone(),
-                trusted_applications: trusted_applications(trust_apps, trust_requirements)?,
+            let trusted = trusted_applications(trust_apps, trust_requirements)?;
+            let identity = if let Some(path) = pkcs12 {
+                identity_from_file(path, pkcs12_password, label.clone(), trusted)?
+            } else {
+                if pkcs12_password.password_env.is_some() || pkcs12_password.password_file.is_some()
+                {
+                    return Err(Error::other("a PKCS#12 password source requires --pkcs12"));
+                }
+                let certificate = certificate
+                    .as_ref()
+                    .expect("clap requires --cert when --pkcs12 is absent");
+                let key = key
+                    .as_ref()
+                    .expect("clap requires --key when --pkcs12 is absent");
+                NewIdentity {
+                    certificate: read_der(certificate, keychain::der::PEM_CERTIFICATE)?,
+                    private_key: read_der(key, keychain::der::PEM_PRIVATE_KEY)?,
+                    label: label.clone(),
+                    trusted_applications: trusted,
+                }
             };
             add_identity(cli, keychain, password, &identity)
         }
     }
+}
+
+fn import_command(cli: &Cli, kind: &ImportKind) -> Result<()> {
+    match kind {
+        ImportKind::Identity {
+            password,
+            pkcs12_password,
+            label,
+            trust_apps,
+            trust_requirements,
+            input,
+            keychain,
+        } => {
+            let trusted = trusted_applications(trust_apps, trust_requirements)?;
+            let identity = identity_from_file(input, pkcs12_password, label.clone(), trusted)?;
+            add_identity(cli, keychain, password, &identity)
+        }
+    }
+}
+
+fn identity_from_file(
+    path: &Path,
+    password: &Pkcs12PasswordSource,
+    label: Option<String>,
+    trusted_applications: Vec<keychain::acl::TrustedApplication>,
+) -> Result<NewIdentity> {
+    let data = std::fs::read(path).map_err(|source| Error::reading(path, source))?;
+    let is_combined_pem = std::str::from_utf8(&data).is_ok_and(|text| {
+        text.contains("-----BEGIN CERTIFICATE-----") && text.contains("-----BEGIN PRIVATE KEY-----")
+    });
+    if is_combined_pem {
+        return Ok(NewIdentity {
+            certificate: keychain::der::pem_block(&data, keychain::der::PEM_CERTIFICATE)?,
+            private_key: keychain::der::pem_block(&data, keychain::der::PEM_PRIVATE_KEY)?,
+            label,
+            trusted_applications,
+        });
+    }
+
+    let der = keychain::der::pem_or_der(&data)?;
+    let bundle = keychain::pkcs12::decode(&der, &password.resolve()?)?;
+    Ok(NewIdentity {
+        certificate: bundle.certificate,
+        private_key: bundle.private_key,
+        label: label.or(bundle.friendly_name),
+        trusted_applications,
+    })
 }
 
 fn find_command(cli: &Cli, kind: &FindKind) -> Result<()> {
@@ -2236,6 +2408,9 @@ fn export_command(cli: &Cli, kind: &ExportKind) -> Result<()> {
             password,
             label,
             out,
+            pkcs12,
+            pem,
+            pkcs12_password,
             keychain,
         } => {
             let mut file = KeychainFile::open(keychain)?;
@@ -2247,12 +2422,32 @@ fn export_command(cli: &Cli, kind: &ExportKind) -> Result<()> {
                 .private_key_record
                 .ok_or_else(|| Error::other("that identity has no private key in this keychain"))?;
             let key = file.private_key_pkcs8(record)?;
-            let mut bytes =
-                keychain::der::to_pem(keychain::der::PEM_CERTIFICATE, &identity.certificate)
-                    .into_bytes();
-            bytes.extend_from_slice(
-                keychain::der::to_pem(keychain::der::PEM_PRIVATE_KEY, key.as_slice()).as_bytes(),
-            );
+            let bytes = if *pkcs12 {
+                let bundle = keychain::pkcs12::Identity {
+                    certificate: identity.certificate.clone(),
+                    private_key: key.as_slice().to_vec(),
+                    friendly_name: identity.label.clone(),
+                };
+                let der = keychain::pkcs12::encode(&bundle, &pkcs12_password.resolve()?)?;
+                if *pem {
+                    keychain::der::to_pem(keychain::der::PEM_PKCS12, &der).into_bytes()
+                } else {
+                    der
+                }
+            } else {
+                if pkcs12_password.password_env.is_some() || pkcs12_password.password_file.is_some()
+                {
+                    return Err(Error::other("a PKCS#12 password source requires --pkcs12"));
+                }
+                let mut pem =
+                    keychain::der::to_pem(keychain::der::PEM_CERTIFICATE, &identity.certificate)
+                        .into_bytes();
+                pem.extend_from_slice(
+                    keychain::der::to_pem(keychain::der::PEM_PRIVATE_KEY, key.as_slice())
+                        .as_bytes(),
+                );
+                pem
+            };
             write_export(cli, out.as_deref(), &bytes, "identity", &identity.label)
         }
     }

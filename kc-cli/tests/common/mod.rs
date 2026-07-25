@@ -303,6 +303,27 @@ pub fn import_identity_with_security(
     key: &Path,
     friendly_name: &str,
 ) {
+    let bundle = generate_pkcs12(dir, name, certificate, key, friendly_name, "x");
+    security_ok(&[
+        "import",
+        bundle.to_str().expect("utf-8 path"),
+        "-k",
+        keychain.to_str().expect("utf-8 path"),
+        "-P",
+        "x",
+        "-A",
+    ]);
+}
+
+/// Bundle a certificate and key into a DER PKCS#12 file with OpenSSL.
+pub fn generate_pkcs12(
+    dir: &TempDir,
+    name: &str,
+    certificate: &Path,
+    key: &Path,
+    friendly_name: &str,
+    password: &str,
+) -> PathBuf {
     let bundle = dir.join(&format!("{name}.p12"));
     let status = Command::new("/usr/bin/openssl")
         .args([
@@ -315,8 +336,8 @@ pub fn import_identity_with_security(
             "-keypbe",
             "PBE-SHA1-3DES",
             "-passout",
-            "pass:x",
         ])
+        .arg(format!("pass:{password}"))
         .arg("-name")
         .arg(friendly_name)
         .arg("-inkey")
@@ -333,13 +354,5 @@ pub fn import_identity_with_security(
         String::from_utf8_lossy(&status.stderr)
     );
 
-    security_ok(&[
-        "import",
-        bundle.to_str().expect("utf-8 path"),
-        "-k",
-        keychain.to_str().expect("utf-8 path"),
-        "-P",
-        "x",
-        "-A",
-    ]);
+    bundle
 }

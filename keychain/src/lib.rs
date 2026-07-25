@@ -24,6 +24,7 @@ pub mod error;
 pub mod format;
 pub mod index;
 pub mod output;
+pub mod pkcs12;
 pub mod records;
 pub mod schema;
 pub mod secret;
