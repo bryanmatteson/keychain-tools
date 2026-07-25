@@ -78,33 +78,63 @@ impl Cli {
 /// arguments. `-p` prompts; a value may also be supplied for shell expressions.
 #[derive(Args, Clone, Debug, Default)]
 struct PasswordSource {
-    /// Prompt, or use PASSWORD (visible in argv; prefer `-p "$(command)"`)
+    /// Use PASSWORD (visible in argv; prefer a shell expression)
     #[arg(
         short = 'p',
         long = "password",
         value_name = "PASSWORD",
-        num_args = 0..=1,
         group = "password-source"
     )]
-    password: Option<Option<String>>,
+    password: Option<String>,
 
-    /// Read the keychain password from this environment variable
+    /// Read the password from ENV_VAR [default when omitted: KC_PASSWORD]
     #[arg(
-        short = 'e',
+        short = 'E',
+        short_alias = 'e',
         long = "password-env",
-        value_name = "NAME",
+        value_name = "ENV_VAR",
+        num_args = 0..=1,
+        default_missing_value = "KC_PASSWORD",
         group = "password-source"
     )]
     password_env: Option<String>,
 
     /// Read the keychain password from this file, or from stdin for `-`
     #[arg(
-        short = 'f',
+        short = 'F',
+        short_alias = 'f',
         long = "password-file",
         value_name = "FILE",
         group = "password-source"
     )]
     password_file: Option<PathBuf>,
+
+    /// Generate a new password [default template when omitted: sha1]
+    #[arg(
+        long = "password-gen",
+        value_name = "TEMPLATE",
+        num_args = 0..=1,
+        default_missing_value = "sha1",
+        require_equals = true,
+        group = "password-source"
+    )]
+    password_gen: Option<String>,
+
+    /// Character policy for a generated password
+    #[arg(long = "password-policy", value_enum, requires = "password_gen")]
+    password_policy: Option<PasswordPolicy>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum PasswordPolicy {
+    /// Letters and digits
+    Alphanumeric,
+    /// Letters and digits, with lowercase, uppercase, and a digit guaranteed
+    MixedCase,
+    /// Letters, digits, and punctuation
+    Symbol,
+    /// All classes, with lowercase, uppercase, digit, and punctuation guaranteed
+    Secure,
 }
 
 /// Where a PKCS#12 container password comes from.
@@ -175,7 +205,10 @@ impl Pkcs12PasswordSource {
 impl PasswordSource {
     /// True when a source was named, rather than left to a pipe or a prompt.
     fn is_explicit(&self) -> bool {
-        self.password.is_some() || self.password_env.is_some() || self.password_file.is_some()
+        self.password.is_some()
+            || self.password_env.is_some()
+            || self.password_file.is_some()
+            || self.password_gen.is_some()
     }
 
     /// Resolve the password, prompting when nothing else supplies it.
@@ -183,19 +216,15 @@ impl PasswordSource {
     /// `confirm` asks twice, for a password that is being set rather than used.
     fn resolve(&self, confirm: bool) -> Result<String> {
         if let Some(password) = &self.password {
-            if let Some(password) = password {
-                return Ok(password.clone());
+            return Ok(password.clone());
+        }
+        if let Some(template) = &self.password_gen {
+            if !confirm {
+                return Err(Error::other(
+                    "--password-gen can only be used when setting a new password",
+                ));
             }
-            let password = rpassword::prompt_password("Keychain password: ")
-                .map_err(|source| Error::io("could not read the password", source))?;
-            if confirm {
-                let again = rpassword::prompt_password("Confirm: ")
-                    .map_err(|source| Error::io("could not read the password", source))?;
-                if password != again {
-                    return Err(Error::other("the two entries did not match"));
-                }
-            }
-            return Ok(password);
+            return generate_password(template, self.password_policy);
         }
         if let Some(name) = &self.password_env {
             let value = std::env::var(name)
@@ -233,6 +262,59 @@ impl PasswordSource {
             return Ok(None);
         }
         self.resolve(false).map(Some)
+    }
+}
+
+fn generate_password(template: &str, policy: Option<PasswordPolicy>) -> Result<String> {
+    match template {
+        "sha1" if policy.is_none() => Ok(hex::encode(keychain::secret::random_bytes(20))),
+        "sha1" => generate_policy_password(40, policy.expect("checked above")),
+        _ => Err(Error::other(format!(
+            "unknown password template {template:?}; expected sha1"
+        ))),
+    }
+}
+
+fn generate_policy_password(length: usize, policy: PasswordPolicy) -> Result<String> {
+    const LOWER: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
+    const UPPER: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    const DIGITS: &[u8] = b"0123456789";
+    const SYMBOLS: &[u8] = b"!#$%&()*+,-./:;<=>?@[]^_{|}~";
+
+    let (alphabet, required): (Vec<u8>, &[&[u8]]) = match policy {
+        PasswordPolicy::Alphanumeric => ([LOWER, UPPER, DIGITS].concat(), &[]),
+        PasswordPolicy::MixedCase => ([LOWER, UPPER, DIGITS].concat(), &[LOWER, UPPER, DIGITS]),
+        PasswordPolicy::Symbol => ([LOWER, UPPER, DIGITS, SYMBOLS].concat(), &[]),
+        PasswordPolicy::Secure => (
+            [LOWER, UPPER, DIGITS, SYMBOLS].concat(),
+            &[LOWER, UPPER, DIGITS, SYMBOLS],
+        ),
+    };
+    let mut output = Vec::with_capacity(length);
+    for class in required {
+        output.push(random_character(class));
+    }
+    while output.len() < length {
+        output.push(random_character(&alphabet));
+    }
+    for index in (1..output.len()).rev() {
+        let selected = random_index(index + 1);
+        output.swap(index, selected);
+    }
+    String::from_utf8(output).map_err(|_| Error::other("generated password was not UTF-8"))
+}
+
+fn random_character(alphabet: &[u8]) -> u8 {
+    alphabet[random_index(alphabet.len())]
+}
+
+fn random_index(upper: usize) -> usize {
+    let limit = 256 - (256 % upper);
+    loop {
+        let byte = keychain::secret::random_bytes(1)[0] as usize;
+        if byte < limit {
+            return byte % upper;
+        }
     }
 }
 
@@ -396,10 +478,9 @@ enum Command {
         #[arg(
             long = "to-password",
             value_name = "PASSWORD",
-            num_args = 0..=1,
             group = "to-password-source"
         )]
-        to_password: Option<Option<String>>,
+        to_password: Option<String>,
         /// Password for the destination keychain, from an environment variable
         #[arg(
             long = "to-password-env",
@@ -440,10 +521,19 @@ enum Command {
         #[arg(
             long = "new-password",
             value_name = "PASSWORD",
-            num_args = 0..=1,
             group = "new-password-source"
         )]
-        new_password: Option<Option<String>>,
+        new_password: Option<String>,
+        /// Generate the new password
+        #[arg(long = "new-password-gen", value_name = "TEMPLATE", num_args = 0..=1, default_missing_value = "sha1", require_equals = true, group = "new-password-source")]
+        new_password_gen: Option<String>,
+        /// Character policy for a generated new password
+        #[arg(
+            long = "new-password-policy",
+            value_enum,
+            requires = "new_password_gen"
+        )]
+        new_password_policy: Option<PasswordPolicy>,
         /// New password, from an environment variable
         #[arg(
             long = "new-password-env",
@@ -1084,6 +1174,7 @@ fn run(cli: &Cli) -> Result<()> {
                     keychain.display()
                 )));
             }
+            let generated_password = password.password_gen.is_some();
             let password = password.resolve(true)?;
             let options = CreateOptions {
                 idle_timeout: *idle_timeout,
@@ -1091,10 +1182,20 @@ fn run(cli: &Cli) -> Result<()> {
             };
             let file = create(password.as_bytes(), &options)?;
             file.save(&keychain)?;
+            let generated = generated_password.then_some(password.as_str());
             report(
                 cli,
-                &format!("created {}", keychain.display()),
-                || serde_json::json!({ "ok": true, "keychain": keychain }),
+                &generated.map_or_else(
+                    || format!("created {}", keychain.display()),
+                    |value| format!("created {}\npassword: {value}", keychain.display()),
+                ),
+                || {
+                    serde_json::json!({
+                        "ok": true,
+                        "keychain": keychain,
+                        "generated_password": generated,
+                    })
+                },
             );
             Ok(())
         }
@@ -1205,6 +1306,8 @@ fn run(cli: &Cli) -> Result<()> {
                 password: to_password.clone(),
                 password_env: to_password_env.clone(),
                 password_file: to_password_file.clone(),
+                password_gen: None,
+                password_policy: None,
             };
             copy_command(
                 cli,
@@ -1222,6 +1325,8 @@ fn run(cli: &Cli) -> Result<()> {
         Command::Passwd {
             password,
             new_password,
+            new_password_gen,
+            new_password_policy,
             new_password_env,
             new_password_file,
             keychain,
@@ -1230,6 +1335,8 @@ fn run(cli: &Cli) -> Result<()> {
                 password: new_password.clone(),
                 password_env: new_password_env.clone(),
                 password_file: new_password_file.clone(),
+                password_gen: new_password_gen.clone(),
+                password_policy: *new_password_policy,
             };
             passwd_command(cli, &resolve_keychain(keychain)?, password, &new)
         }
@@ -2803,7 +2910,7 @@ fn passwd_command(
     file.unlock(old_password.as_bytes())?;
 
     let new_password = if new.is_explicit() {
-        new.resolve(false)?
+        new.resolve(true)?
     } else if std::io::stdin().is_terminal() {
         let entered = rpassword::prompt_password("New keychain password: ")
             .map_err(|source| Error::io("could not read the password", source))?;
@@ -2822,10 +2929,20 @@ fn passwd_command(
     file.change_password(old_password.as_bytes(), new_password.as_bytes())?;
     file.save(keychain)?;
 
+    let generated = new.password_gen.as_ref().map(|_| new_password.as_str());
     report(
         cli,
-        "password changed",
-        || serde_json::json!({ "ok": true, "keychain": keychain }),
+        &generated.map_or_else(
+            || "password changed".to_string(),
+            |value| format!("password changed\npassword: {value}"),
+        ),
+        || {
+            serde_json::json!({
+                "ok": true,
+                "keychain": keychain,
+                "generated_password": generated,
+            })
+        },
     );
     Ok(())
 }

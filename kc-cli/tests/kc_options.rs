@@ -282,6 +282,99 @@ fn the_password_can_be_supplied_directly() {
 }
 
 #[test]
+fn password_flags_and_generator_follow_the_new_contract() {
+    let dir = TempDir::new("options-uppercase");
+    let path = dir.join("generated.keychain");
+    let as_str = path.to_str().unwrap();
+
+    let output = kc(&["create", "--password-gen", as_str], None);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let password = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("password: "))
+        .expect("generated password is reported");
+    assert_eq!(password.len(), 40);
+    assert!(password.bytes().all(|byte| byte.is_ascii_hexdigit()));
+
+    let output = kc(&["ls", "-p", password, as_str], None);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = kc_with_env(&["ls", as_str, "-E"], &[("KC_PASSWORD", password)]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn generated_password_policies_control_character_classes() {
+    let dir = TempDir::new("options-policies");
+    for policy in ["alphanumeric", "mixed-case", "symbol", "secure"] {
+        let path = dir.join(&format!("{policy}.keychain"));
+        let output = kc(
+            &[
+                "create",
+                "--password-gen",
+                "--password-policy",
+                policy,
+                path.to_str().unwrap(),
+            ],
+            None,
+        );
+        assert!(
+            output.status.success(),
+            "{policy}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let password = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("password: "))
+            .unwrap();
+        assert_eq!(password.len(), 40);
+        match policy {
+            "alphanumeric" => assert!(password.bytes().all(|byte| byte.is_ascii_alphanumeric())),
+            "mixed-case" => {
+                assert!(password.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+                assert!(password.bytes().any(|byte| byte.is_ascii_lowercase()));
+                assert!(password.bytes().any(|byte| byte.is_ascii_uppercase()));
+                assert!(password.bytes().any(|byte| byte.is_ascii_digit()));
+            }
+            "symbol" => assert!(password.bytes().any(|byte| !byte.is_ascii_alphanumeric())),
+            "secure" => {
+                assert!(password.bytes().any(|byte| byte.is_ascii_lowercase()));
+                assert!(password.bytes().any(|byte| byte.is_ascii_uppercase()));
+                assert!(password.bytes().any(|byte| byte.is_ascii_digit()));
+                assert!(password.bytes().any(|byte| !byte.is_ascii_alphanumeric()));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    let output = kc(
+        &[
+            "create",
+            "--password-policy",
+            "secure",
+            dir.join("invalid.keychain").to_str().unwrap(),
+        ],
+        None,
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--password-gen"));
+}
+
+#[test]
 fn format_secret_prints_the_secret_and_nothing_else() {
     let dir = TempDir::new("options-format");
     let keychain = populated(&dir, "pw");

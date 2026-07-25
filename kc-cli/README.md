@@ -140,22 +140,26 @@ Commands that decrypt or modify data accept mutually exclusive password
 sources:
 
 ```bash
-kc find generic -a alice -w -p login
 kc find generic -a alice -w -p "$(secret-tool lookup kc login)" login
-kc find generic -a alice -w -e KC_PASSWORD ~/demo.keychain
-kc find generic -a alice -w -f ~/.kc-pw    ~/demo.keychain
-kc find generic -a alice -w -f -           ~/demo.keychain
+kc find generic -a alice -w -E KC_PASSWORD ~/demo.keychain
+kc find generic -a alice -w login -E
+kc find generic -a alice -w -F ~/.kc-pw    ~/demo.keychain
+kc create --password-gen machina
 ```
 
-- `-p` prompts without echoing.
 - `-p PASSWORD` supplies a value directly. It is visible in process arguments;
-  prefer a shell expression such as `-p "$(command)"`, or use `-e`/`-f`.
-- `-e NAME` reads the password from an environment variable.
-- `-f FILE` reads the first line of a file.
-- `-f -` reads the password from standard input.
+  prefer a shell expression such as `-p "$(command)"`, or use `-E`/`-F`.
+- `-E [ENV_VAR]` reads an environment variable; bare `-E` uses `KC_PASSWORD`.
+- `-F FILE` reads the first line of a file; `-F -` reads standard input.
+- `--password-gen[=TEMPLATE]` generates a new password; without a template it
+  uses `sha1`, producing 20 random bytes as 40 lowercase hexadecimal characters.
+- `--password-policy alphanumeric|mixed-case|symbol|secure` changes the
+  generated alphabet. `mixed-case` guarantees lowercase, uppercase, and a
+  digit; `secure` additionally guarantees punctuation. It requires
+  `--password-gen`.
 
 Without an option, `kc` reads from standard input when it is connected to a
-pipe and prompts when it is connected to a terminal.
+pipe and prompts without echoing when connected to a terminal.
 
 ### Querying attributes
 
