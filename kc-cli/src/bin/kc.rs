@@ -272,7 +272,8 @@ enum Command {
         #[arg(long, action = ArgAction::SetTrue)]
         no_lock_on_sleep: bool,
 
-        keychain: Option<PathBuf>,
+        /// Output path or bare keychain name
+        keychain: PathBuf,
     },
 
     /// Show the keychain's format, tables, and key-derivation parameters
@@ -1076,7 +1077,7 @@ fn run(cli: &Cli) -> Result<()> {
             no_lock_on_sleep,
             keychain,
         } => {
-            let keychain = resolve_keychain(keychain)?;
+            let keychain = resolve_keychain(&Some(keychain.clone()))?;
             if keychain.exists() {
                 return Err(Error::other(format!(
                     "{} already exists",

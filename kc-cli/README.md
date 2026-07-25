@@ -37,7 +37,7 @@ The final command uses Apple's `security` tool to read an item written by
 ## Commands
 
 ```text
-kc create [--idle-timeout SECS] [--no-lock-on-sleep] [KEYCHAIN]
+kc create [--idle-timeout SECS] [--no-lock-on-sleep] KEYCHAIN
 kc info [KEYCHAIN]
 kc show [-d] [--all] FILE
 kc ls FILE

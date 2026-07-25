@@ -5,6 +5,17 @@ mod common;
 use common::*;
 
 #[test]
+fn create_requires_an_output_even_when_a_default_is_configured() {
+    let home = TempDir::new("create-output-home");
+    let output = kc_with_env(
+        &["create", "-p", "test-password"],
+        &[("HOME", home.path().to_str().unwrap())],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("<KEYCHAIN>"));
+}
+
+#[test]
 fn bare_names_and_the_saved_default_resolve_under_home() {
     let home = TempDir::new("config-home");
     std::fs::create_dir_all(home.join("Library/Keychains")).unwrap();
@@ -20,7 +31,10 @@ fn bare_names_and_the_saved_default_resolve_under_home() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let output = kc_with_env(&["create", "-p", "test-password"], &[("HOME", home_text)]);
+    let output = kc_with_env(
+        &["create", "-p", "test-password", "machina"],
+        &[("HOME", home_text)],
+    );
     assert!(
         output.status.success(),
         "{}",
