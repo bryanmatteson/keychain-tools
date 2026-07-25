@@ -14,6 +14,9 @@ use keychain::format::{self, Record};
 use keychain::write::{CreateOptions, NewIdentity, NewItem, create, now_timestamp};
 use keychain::{Error, Item, KeychainFile, Query, RecordType, Result};
 
+#[path = "../config.rs"]
+mod config;
+
 #[derive(Parser)]
 #[command(
     name = "kc",
@@ -71,12 +74,20 @@ impl Cli {
 
 /// Where the keychain password comes from.
 ///
-/// Deliberately never an argument: `ps` shows `argv` to every user on the
-/// machine, and shell history keeps it afterwards. The two sources here keep it
-/// out of both, and with neither one the password is read from a pipe or
-/// prompted for.
+/// Environment variables and files avoid exposing a password in process
+/// arguments. `-p` prompts; a value may also be supplied for shell expressions.
 #[derive(Args, Clone, Debug, Default)]
 struct PasswordSource {
+    /// Prompt, or use PASSWORD (visible in argv; prefer `-p "$(command)"`)
+    #[arg(
+        short = 'p',
+        long = "password",
+        value_name = "PASSWORD",
+        num_args = 0..=1,
+        group = "password-source"
+    )]
+    password: Option<Option<String>>,
+
     /// Read the keychain password from this environment variable
     #[arg(
         short = 'e',
@@ -99,6 +110,16 @@ struct PasswordSource {
 /// Where a PKCS#12 container password comes from.
 #[derive(Args, Clone, Debug, Default)]
 struct Pkcs12PasswordSource {
+    /// Prompt, or use PASSWORD (visible in argv; prefer a shell expression)
+    #[arg(
+        id = "pkcs12-password",
+        long = "pkcs12-password",
+        value_name = "PASSWORD",
+        num_args = 0..=1,
+        group = "pkcs12-password-source"
+    )]
+    password: Option<Option<String>>,
+
     /// Read the PKCS#12 password from this environment variable
     #[arg(
         id = "pkcs12-password-env",
@@ -120,6 +141,15 @@ struct Pkcs12PasswordSource {
 
 impl Pkcs12PasswordSource {
     fn resolve(&self) -> Result<String> {
+        if let Some(password) = &self.password {
+            return password.clone().map_or_else(
+                || {
+                    rpassword::prompt_password("PKCS#12 password: ")
+                        .map_err(|source| Error::io("could not read the PKCS#12 password", source))
+                },
+                Ok,
+            );
+        }
         if let Some(name) = &self.password_env {
             let value = std::env::var(name)
                 .map_err(|_| Error::other(format!("the environment variable {name} is not set")))?;
@@ -145,13 +175,28 @@ impl Pkcs12PasswordSource {
 impl PasswordSource {
     /// True when a source was named, rather than left to a pipe or a prompt.
     fn is_explicit(&self) -> bool {
-        self.password_env.is_some() || self.password_file.is_some()
+        self.password.is_some() || self.password_env.is_some() || self.password_file.is_some()
     }
 
     /// Resolve the password, prompting when nothing else supplies it.
     ///
     /// `confirm` asks twice, for a password that is being set rather than used.
     fn resolve(&self, confirm: bool) -> Result<String> {
+        if let Some(password) = &self.password {
+            if let Some(password) = password {
+                return Ok(password.clone());
+            }
+            let password = rpassword::prompt_password("Keychain password: ")
+                .map_err(|source| Error::io("could not read the password", source))?;
+            if confirm {
+                let again = rpassword::prompt_password("Confirm: ")
+                    .map_err(|source| Error::io("could not read the password", source))?;
+                if password != again {
+                    return Err(Error::other("the two entries did not match"));
+                }
+            }
+            return Ok(password);
+        }
         if let Some(name) = &self.password_env {
             let value = std::env::var(name)
                 .map_err(|_| Error::other(format!("the environment variable {name} is not set")))?;
@@ -208,6 +253,10 @@ fn read_password_line() -> Result<String> {
     Ok(first_line(&line).to_string())
 }
 
+fn resolve_keychain(keychain: &Option<PathBuf>) -> Result<PathBuf> {
+    config::Config::load()?.resolve(keychain.as_deref())
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Create a new keychain
@@ -223,11 +272,11 @@ enum Command {
         #[arg(long, action = ArgAction::SetTrue)]
         no_lock_on_sleep: bool,
 
-        keychain: PathBuf,
+        keychain: Option<PathBuf>,
     },
 
     /// Show the keychain's format, tables, and key-derivation parameters
-    Info { keychain: PathBuf },
+    Info { keychain: Option<PathBuf> },
 
     /// Show items and their attributes
     Show {
@@ -242,21 +291,21 @@ enum Command {
         #[arg(long, action = ArgAction::SetTrue)]
         all: bool,
 
-        keychain: PathBuf,
+        keychain: Option<PathBuf>,
     },
 
     /// List the wrapped item keys
     Ls {
         #[command(flatten)]
         password: PasswordSource,
-        keychain: PathBuf,
+        keychain: Option<PathBuf>,
     },
 
     /// Check the keychain's internal consistency
     Verify {
         #[command(flatten)]
         password: PasswordSource,
-        keychain: PathBuf,
+        keychain: Option<PathBuf>,
     },
 
     /// Store an item
@@ -304,7 +353,7 @@ enum Command {
         #[arg(long = "set", value_name = "NAME=VALUE")]
         set_attributes: Vec<String>,
 
-        keychain: PathBuf,
+        keychain: Option<PathBuf>,
     },
 
     /// Delete items
@@ -332,7 +381,7 @@ enum Command {
         #[arg(short = 'A', long, action = ArgAction::SetTrue)]
         any: bool,
 
-        keychain: PathBuf,
+        keychain: Option<PathBuf>,
     },
 
     /// Copy an item into another keychain
@@ -342,11 +391,27 @@ enum Command {
         #[command(flatten)]
         selector: Selector,
 
+        /// Prompt for the destination password, or use the supplied value
+        #[arg(
+            long = "to-password",
+            value_name = "PASSWORD",
+            num_args = 0..=1,
+            group = "to-password-source"
+        )]
+        to_password: Option<Option<String>>,
         /// Password for the destination keychain, from an environment variable
-        #[arg(long = "to-password-env", value_name = "NAME")]
+        #[arg(
+            long = "to-password-env",
+            value_name = "NAME",
+            group = "to-password-source"
+        )]
         to_password_env: Option<String>,
         /// Password for the destination keychain, from a file
-        #[arg(long = "to-password-file", value_name = "FILE")]
+        #[arg(
+            long = "to-password-file",
+            value_name = "FILE",
+            group = "to-password-source"
+        )]
         to_password_file: Option<PathBuf>,
         /// Allow only these applications to use the copy (repeatable)
         #[arg(short = 'T', long = "trust-app", value_name = "PATH")]
@@ -370,14 +435,30 @@ enum Command {
         #[command(flatten)]
         password: PasswordSource,
 
+        /// Prompt for the new password, or use the supplied value
+        #[arg(
+            long = "new-password",
+            value_name = "PASSWORD",
+            num_args = 0..=1,
+            group = "new-password-source"
+        )]
+        new_password: Option<Option<String>>,
         /// New password, from an environment variable
-        #[arg(long = "new-password-env", value_name = "NAME")]
+        #[arg(
+            long = "new-password-env",
+            value_name = "NAME",
+            group = "new-password-source"
+        )]
         new_password_env: Option<String>,
         /// New password, from a file's first line
-        #[arg(long = "new-password-file", value_name = "FILE")]
+        #[arg(
+            long = "new-password-file",
+            value_name = "FILE",
+            group = "new-password-source"
+        )]
         new_password_file: Option<PathBuf>,
 
-        keychain: PathBuf,
+        keychain: Option<PathBuf>,
     },
 
     /// Show or change the keychain's lock settings
@@ -398,13 +479,49 @@ enum Command {
         #[arg(long, action = ArgAction::SetTrue, conflicts_with = "lock_on_sleep")]
         no_lock_on_sleep: bool,
 
-        keychain: PathBuf,
+        keychain: Option<PathBuf>,
     },
 
     /// Print a shell completion script
     Completions {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
+    },
+
+    /// Show or change persistent keychain-name defaults
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Show the configuration and effective search paths
+    Show,
+    /// Set a configuration property
+    Set {
+        /// Property: keychains.default or search.paths
+        property: String,
+        /// New value; search.paths accepts more than one
+        #[arg(required = true, num_args = 1..)]
+        values: Vec<String>,
+    },
+    /// Append values to a list property
+    Append {
+        /// List property: search.paths
+        property: String,
+        /// Values to append
+        #[arg(required = true, num_args = 1..)]
+        values: Vec<String>,
+    },
+    /// Prepend values to a list property
+    Prepend {
+        /// List property: search.paths
+        property: String,
+        /// Values to prepend
+        #[arg(required = true, num_args = 1..)]
+        values: Vec<String>,
     },
 }
 
@@ -427,7 +544,7 @@ enum ImportKind {
         trust_requirements: Vec<String>,
         /// Combined PEM identity or PKCS#12/PFX file, in PEM or DER form
         input: PathBuf,
-        keychain: PathBuf,
+        keychain: Option<PathBuf>,
     },
 }
 
@@ -542,7 +659,7 @@ enum RmKind {
         #[arg(long, action = ArgAction::SetTrue)]
         all: bool,
 
-        keychain: PathBuf,
+        keychain: Option<PathBuf>,
     },
 
     /// Delete an identity: its certificate and its private key
@@ -556,7 +673,7 @@ enum RmKind {
         #[arg(long)]
         hash: Option<String>,
 
-        keychain: PathBuf,
+        keychain: Option<PathBuf>,
     },
 
     /// Delete a certificate, leaving its private key behind
@@ -571,7 +688,7 @@ enum RmKind {
         #[arg(long)]
         hash: Option<String>,
 
-        keychain: PathBuf,
+        keychain: Option<PathBuf>,
     },
 }
 
@@ -591,7 +708,7 @@ enum ExportKind {
         /// Write to this file instead of stdout
         #[arg(short = 'o', long)]
         out: Option<PathBuf>,
-        keychain: PathBuf,
+        keychain: Option<PathBuf>,
     },
 
     /// Write a private key out as unencrypted PKCS#8
@@ -605,7 +722,7 @@ enum ExportKind {
         #[arg(short = 'o', long)]
         out: Option<PathBuf>,
 
-        keychain: PathBuf,
+        keychain: Option<PathBuf>,
     },
 
     /// Write both halves of an identity: certificate then private key
@@ -625,7 +742,7 @@ enum ExportKind {
         #[command(flatten)]
         pkcs12_password: Pkcs12PasswordSource,
 
-        keychain: PathBuf,
+        keychain: Option<PathBuf>,
     },
 }
 
@@ -664,7 +781,7 @@ enum AddKind {
         #[arg(long = "trust-requirement", value_name = "PATH=FILE")]
         trust_requirements: Vec<String>,
 
-        keychain: PathBuf,
+        keychain: Option<PathBuf>,
     },
 
     /// Store an internet password
@@ -710,7 +827,7 @@ enum AddKind {
         #[arg(long = "trust-requirement", value_name = "PATH=FILE")]
         trust_requirements: Vec<String>,
 
-        keychain: PathBuf,
+        keychain: Option<PathBuf>,
     },
 
     /// Store an AppleShare password
@@ -753,7 +870,7 @@ enum AddKind {
         #[arg(long = "trust-requirement", value_name = "PATH=FILE")]
         trust_requirements: Vec<String>,
 
-        keychain: PathBuf,
+        keychain: Option<PathBuf>,
     },
 
     /// Store an identity (certificate + private key)
@@ -801,7 +918,7 @@ enum AddKind {
         #[arg(long = "trust-requirement", value_name = "PATH=FILE")]
         trust_requirements: Vec<String>,
 
-        keychain: PathBuf,
+        keychain: Option<PathBuf>,
     },
 }
 
@@ -835,7 +952,7 @@ enum FindKind {
         #[arg(short = 'w', long, action = ArgAction::SetTrue)]
         secret_only: bool,
 
-        keychain: PathBuf,
+        keychain: Option<PathBuf>,
     },
 
     /// Find an internet password
@@ -870,7 +987,7 @@ enum FindKind {
         #[arg(short = 'w', long, action = ArgAction::SetTrue)]
         secret_only: bool,
 
-        keychain: PathBuf,
+        keychain: Option<PathBuf>,
     },
 
     /// Find an AppleShare password
@@ -905,7 +1022,7 @@ enum FindKind {
         #[arg(short = 'w', long, action = ArgAction::SetTrue)]
         secret_only: bool,
 
-        keychain: PathBuf,
+        keychain: Option<PathBuf>,
     },
 
     /// Find an identity (certificate + private key)
@@ -914,7 +1031,7 @@ enum FindKind {
         #[arg(short = 'l', long)]
         label: Option<String>,
 
-        keychain: PathBuf,
+        keychain: Option<PathBuf>,
     },
 }
 
@@ -959,6 +1076,7 @@ fn run(cli: &Cli) -> Result<()> {
             no_lock_on_sleep,
             keychain,
         } => {
+            let keychain = resolve_keychain(keychain)?;
             if keychain.exists() {
                 return Err(Error::other(format!(
                     "{} already exists",
@@ -971,7 +1089,7 @@ fn run(cli: &Cli) -> Result<()> {
                 lock_on_sleep: !no_lock_on_sleep,
             };
             let file = create(password.as_bytes(), &options)?;
-            file.save(keychain)?;
+            file.save(&keychain)?;
             report(
                 cli,
                 &format!("created {}", keychain.display()),
@@ -980,7 +1098,7 @@ fn run(cli: &Cli) -> Result<()> {
             Ok(())
         }
 
-        Command::Info { keychain } => info(cli, keychain),
+        Command::Info { keychain } => info(cli, &resolve_keychain(keychain)?),
 
         Command::Show {
             password,
@@ -988,9 +1106,10 @@ fn run(cli: &Cli) -> Result<()> {
             all,
             keychain,
         } => {
+            let keychain = resolve_keychain(keychain)?;
             // Printing secrets and nothing else implies asking for them.
             let secrets = *secrets || cli.secrets_only();
-            let mut file = KeychainFile::open(keychain)?;
+            let mut file = KeychainFile::open(&keychain)?;
             if secrets {
                 let password = password.resolve(false)?;
                 file.unlock(password.as_bytes())?;
@@ -998,9 +1117,13 @@ fn run(cli: &Cli) -> Result<()> {
             show(cli, &file, secrets, *all)
         }
 
-        Command::Ls { password, keychain } => list_keys(cli, keychain, password),
+        Command::Ls { password, keychain } => {
+            list_keys(cli, &resolve_keychain(keychain)?, password)
+        }
 
-        Command::Verify { password, keychain } => verify(cli, keychain, password),
+        Command::Verify { password, keychain } => {
+            verify(cli, &resolve_keychain(keychain)?, password)
+        }
 
         Command::Add { kind } => add_command(cli, kind),
 
@@ -1020,7 +1143,7 @@ fn run(cli: &Cli) -> Result<()> {
             keychain,
         } => set_command(
             cli,
-            keychain,
+            &resolve_keychain(keychain)?,
             password,
             selector,
             secret.as_deref(),
@@ -1055,12 +1178,19 @@ fn run(cli: &Cli) -> Result<()> {
                     "-A allows any application; -T restricts to one",
                 ));
             }
-            trust_command(cli, keychain, password, selector, &trusted)
+            trust_command(
+                cli,
+                &resolve_keychain(keychain)?,
+                password,
+                selector,
+                &trusted,
+            )
         }
 
         Command::Cp {
             password,
             selector,
+            to_password,
             to_password_env,
             to_password_file,
             trust_apps,
@@ -1068,14 +1198,17 @@ fn run(cli: &Cli) -> Result<()> {
             source,
             destination,
         } => {
+            let source = resolve_keychain(&Some(source.clone()))?;
+            let destination = resolve_keychain(&Some(destination.clone()))?;
             let to = PasswordSource {
+                password: to_password.clone(),
                 password_env: to_password_env.clone(),
                 password_file: to_password_file.clone(),
             };
             copy_command(
                 cli,
-                source,
-                destination,
+                &source,
+                &destination,
                 password,
                 &to,
                 selector,
@@ -1087,15 +1220,17 @@ fn run(cli: &Cli) -> Result<()> {
 
         Command::Passwd {
             password,
+            new_password,
             new_password_env,
             new_password_file,
             keychain,
         } => {
             let new = PasswordSource {
+                password: new_password.clone(),
                 password_env: new_password_env.clone(),
                 password_file: new_password_file.clone(),
             };
-            passwd_command(cli, keychain, password, &new)
+            passwd_command(cli, &resolve_keychain(keychain)?, password, &new)
         }
 
         Command::Settings {
@@ -1107,7 +1242,7 @@ fn run(cli: &Cli) -> Result<()> {
             keychain,
         } => settings_command(
             cli,
-            keychain,
+            &resolve_keychain(keychain)?,
             password,
             match (idle_timeout, no_timeout) {
                 (Some(seconds), _) => Some(*seconds),
@@ -1128,7 +1263,122 @@ fn run(cli: &Cli) -> Result<()> {
             clap_complete::generate(*shell, &mut command, name, &mut std::io::stdout());
             Ok(())
         }
+
+        Command::Config { action } => config_command(cli, action),
     }
+}
+
+fn config_command(cli: &Cli, action: &ConfigAction) -> Result<()> {
+    let mut config = config::Config::load()?;
+    match action {
+        ConfigAction::Show => {
+            let path = config::Config::path()?;
+            let search_paths = config.all_search_paths()?;
+            if cli.is_json() {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "path": path,
+                        "keychains": { "default": config.default },
+                        "search": { "paths": search_paths },
+                    })
+                );
+            } else {
+                println!("path: {}", path.display());
+                println!("keychains.default: {}", config.default);
+                for search_path in search_paths {
+                    println!("search.paths: {}", search_path.display());
+                }
+            }
+            Ok(())
+        }
+        ConfigAction::Set { property, values } => match property.as_str() {
+            "keychains.default" => {
+                if values.len() != 1 {
+                    return Err(Error::other("keychains.default takes exactly one keychain"));
+                }
+                config.default.clone_from(&values[0]);
+                let path = config.save()?;
+                report(cli, &format!("keychains.default: {}", values[0]), || {
+                    serde_json::json!({
+                        "ok": true,
+                        "path": path,
+                        "property": property,
+                        "value": values[0],
+                    })
+                });
+                Ok(())
+            }
+            "search.paths" => {
+                config.search_paths = values.iter().map(PathBuf::from).collect();
+                let path = config.save()?;
+                report(cli, &format!("search.paths: {}", values.join(", ")), || {
+                    serde_json::json!({
+                        "ok": true,
+                        "path": path,
+                        "property": property,
+                        "value": values,
+                    })
+                });
+                Ok(())
+            }
+            _ => Err(Error::other(format!(
+                "unknown configuration property {property:?}; expected keychains.default or search.paths"
+            ))),
+        },
+        ConfigAction::Append { property, values } => {
+            update_list_property(cli, &mut config, property, values, false)
+        }
+        ConfigAction::Prepend { property, values } => {
+            update_list_property(cli, &mut config, property, values, true)
+        }
+    }
+}
+
+fn update_list_property(
+    cli: &Cli,
+    config: &mut config::Config,
+    property: &str,
+    values: &[String],
+    prepend: bool,
+) -> Result<()> {
+    if property != "search.paths" {
+        return Err(Error::other(format!(
+            "{property:?} is not a list property; append and prepend support search.paths"
+        )));
+    }
+    let mut additions = Vec::new();
+    for value in values {
+        let path = PathBuf::from(value);
+        if !additions.contains(&path) {
+            additions.push(path);
+        }
+    }
+    config.search_paths.retain(|path| !additions.contains(path));
+    if prepend {
+        let mut paths = additions;
+        paths.append(&mut config.search_paths);
+        config.search_paths = paths;
+    } else {
+        config.search_paths.extend(additions);
+    }
+    let path = config.save()?;
+    let operation = if prepend { "prepend" } else { "append" };
+    report(
+        cli,
+        &format!("{operation} search.paths: {}", values.join(", ")),
+        || {
+            serde_json::json!({
+                "ok": true,
+                "path": path,
+                "operation": operation,
+                "property": property,
+                "value": config.search_paths,
+            })
+        },
+    );
+    Ok(())
 }
 
 fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
@@ -1146,6 +1396,7 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
             trust_requirements,
             keychain,
         } => {
+            let keychain = resolve_keychain(keychain)?;
             let item = NewItem {
                 label: label.clone(),
                 account: Some(account.clone()),
@@ -1158,7 +1409,7 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
             };
             add(
                 cli,
-                keychain,
+                &keychain,
                 password,
                 RecordType::GENERIC_PASSWORD,
                 item,
@@ -1183,6 +1434,7 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
             trust_requirements,
             keychain,
         } => {
+            let keychain = resolve_keychain(keychain)?;
             let item = NewItem {
                 label: label.clone(),
                 account: Some(account.clone()),
@@ -1202,7 +1454,7 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
             };
             add(
                 cli,
-                keychain,
+                &keychain,
                 password,
                 RecordType::INTERNET_PASSWORD,
                 item,
@@ -1226,6 +1478,7 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
             trust_requirements,
             keychain,
         } => {
+            let keychain = resolve_keychain(keychain)?;
             let item = NewItem {
                 label: label.clone(),
                 account: Some(account.clone()),
@@ -1241,7 +1494,7 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
             };
             add(
                 cli,
-                keychain,
+                &keychain,
                 password,
                 RecordType::APPLESHARE_PASSWORD,
                 item,
@@ -1260,11 +1513,14 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
             trust_requirements,
             keychain,
         } => {
+            let keychain = resolve_keychain(keychain)?;
             let trusted = trusted_applications(trust_apps, trust_requirements)?;
             let identity = if let Some(path) = pkcs12 {
                 identity_from_file(path, pkcs12_password, label.clone(), trusted)?
             } else {
-                if pkcs12_password.password_env.is_some() || pkcs12_password.password_file.is_some()
+                if pkcs12_password.password.is_some()
+                    || pkcs12_password.password_env.is_some()
+                    || pkcs12_password.password_file.is_some()
                 {
                     return Err(Error::other("a PKCS#12 password source requires --pkcs12"));
                 }
@@ -1281,7 +1537,7 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
                     trusted_applications: trusted,
                 }
             };
-            add_identity(cli, keychain, password, &identity)
+            add_identity(cli, &keychain, password, &identity)
         }
     }
 }
@@ -1297,9 +1553,10 @@ fn import_command(cli: &Cli, kind: &ImportKind) -> Result<()> {
             input,
             keychain,
         } => {
+            let keychain = resolve_keychain(keychain)?;
             let trusted = trusted_applications(trust_apps, trust_requirements)?;
             let identity = identity_from_file(input, pkcs12_password, label.clone(), trusted)?;
-            add_identity(cli, keychain, password, &identity)
+            add_identity(cli, &keychain, password, &identity)
         }
     }
 }
@@ -1311,20 +1568,12 @@ fn identity_from_file(
     trusted_applications: Vec<keychain::acl::TrustedApplication>,
 ) -> Result<NewIdentity> {
     let data = std::fs::read(path).map_err(|source| Error::reading(path, source))?;
-    let is_combined_pem = std::str::from_utf8(&data).is_ok_and(|text| {
-        text.contains("-----BEGIN CERTIFICATE-----") && text.contains("-----BEGIN PRIVATE KEY-----")
-    });
-    if is_combined_pem {
-        return Ok(NewIdentity {
-            certificate: keychain::der::pem_block(&data, keychain::der::PEM_CERTIFICATE)?,
-            private_key: keychain::der::pem_block(&data, keychain::der::PEM_PRIVATE_KEY)?,
-            label,
-            trusted_applications,
-        });
-    }
-
-    let der = keychain::der::pem_or_der(&data)?;
-    let bundle = keychain::pkcs12::decode(&der, &password.resolve()?)?;
+    let container_password = if keychain::is_combined_pem(&data) {
+        None
+    } else {
+        Some(password.resolve()?)
+    };
+    let bundle = keychain::decode_identity(&data, container_password.as_deref())?;
     Ok(NewIdentity {
         certificate: bundle.certificate,
         private_key: bundle.private_key,
@@ -1347,6 +1596,7 @@ fn find_command(cli: &Cli, kind: &FindKind) -> Result<()> {
             secret_only,
             keychain,
         } => {
+            let keychain = resolve_keychain(keychain)?;
             let query = Query {
                 record_type: Some(RecordType::GENERIC_PASSWORD),
                 account: account.clone(),
@@ -1358,7 +1608,7 @@ fn find_command(cli: &Cli, kind: &FindKind) -> Result<()> {
                 attributes: attribute_filters(attributes)?,
                 ..Query::default()
             };
-            find(cli, keychain, password, &query, *secret_only)
+            find(cli, &keychain, password, &query, *secret_only)
         }
 
         FindKind::Internet {
@@ -1375,6 +1625,7 @@ fn find_command(cli: &Cli, kind: &FindKind) -> Result<()> {
             secret_only,
             keychain,
         } => {
+            let keychain = resolve_keychain(keychain)?;
             let query = Query {
                 record_type: Some(RecordType::INTERNET_PASSWORD),
                 account: account.clone(),
@@ -1388,7 +1639,7 @@ fn find_command(cli: &Cli, kind: &FindKind) -> Result<()> {
                 attributes: attribute_filters(attributes)?,
                 ..Query::default()
             };
-            find(cli, keychain, password, &query, *secret_only)
+            find(cli, &keychain, password, &query, *secret_only)
         }
 
         FindKind::AppleShare {
@@ -1405,6 +1656,7 @@ fn find_command(cli: &Cli, kind: &FindKind) -> Result<()> {
             secret_only,
             keychain,
         } => {
+            let keychain = resolve_keychain(keychain)?;
             let query = Query {
                 record_type: Some(RecordType::APPLESHARE_PASSWORD),
                 account: account.clone(),
@@ -1418,10 +1670,12 @@ fn find_command(cli: &Cli, kind: &FindKind) -> Result<()> {
                 attributes: attribute_filters(attributes)?,
                 ..Query::default()
             };
-            find(cli, keychain, password, &query, *secret_only)
+            find(cli, &keychain, password, &query, *secret_only)
         }
 
-        FindKind::Identity { label, keychain } => find_identity(cli, keychain, label.as_deref()),
+        FindKind::Identity { label, keychain } => {
+            find_identity(cli, &resolve_keychain(keychain)?, label.as_deref())
+        }
     }
 }
 
@@ -2120,12 +2374,13 @@ fn rm_command(cli: &Cli, kind: &RmKind) -> Result<()> {
             all,
             keychain,
         } => {
+            let keychain = resolve_keychain(keychain)?;
             if selector.is_empty() {
                 return Err(Error::other(
                     "name the item to delete, for example with -a and -s",
                 ));
             }
-            let mut file = KeychainFile::open(keychain)?;
+            let mut file = KeychainFile::open(&keychain)?;
             // Deleting touches no ciphertext, so the password is optional; it is
             // still accepted so a script can pass one uniformly.
             if let Some(password) = password.resolve_optional(false)? {
@@ -2158,7 +2413,7 @@ fn rm_command(cli: &Cli, kind: &RmKind) -> Result<()> {
                     "records_removed": records,
                 }));
             }
-            file.save(keychain)?;
+            file.save(&keychain)?;
 
             report(
                 cli,
@@ -2175,7 +2430,7 @@ fn rm_command(cli: &Cli, kind: &RmKind) -> Result<()> {
             keychain,
         } => rm_identity(
             cli,
-            keychain,
+            &resolve_keychain(keychain)?,
             password,
             label.as_deref(),
             hash.as_deref(),
@@ -2189,7 +2444,7 @@ fn rm_command(cli: &Cli, kind: &RmKind) -> Result<()> {
             keychain,
         } => rm_identity(
             cli,
-            keychain,
+            &resolve_keychain(keychain)?,
             password,
             label.as_deref(),
             hash.as_deref(),
@@ -2366,7 +2621,8 @@ fn export_command(cli: &Cli, kind: &ExportKind) -> Result<()> {
             out,
             keychain,
         } => {
-            let mut file = KeychainFile::open(keychain)?;
+            let keychain = resolve_keychain(keychain)?;
+            let mut file = KeychainFile::open(&keychain)?;
             if let Some(password) = password.resolve_optional(false)? {
                 file.unlock(password.as_bytes())?;
             }
@@ -2387,7 +2643,8 @@ fn export_command(cli: &Cli, kind: &ExportKind) -> Result<()> {
             out,
             keychain,
         } => {
-            let mut file = KeychainFile::open(keychain)?;
+            let keychain = resolve_keychain(keychain)?;
+            let mut file = KeychainFile::open(&keychain)?;
             let password = password.resolve(false)?;
             file.unlock(password.as_bytes())?;
 
@@ -2413,7 +2670,8 @@ fn export_command(cli: &Cli, kind: &ExportKind) -> Result<()> {
             pkcs12_password,
             keychain,
         } => {
-            let mut file = KeychainFile::open(keychain)?;
+            let keychain = resolve_keychain(keychain)?;
+            let mut file = KeychainFile::open(&keychain)?;
             let password = password.resolve(false)?;
             file.unlock(password.as_bytes())?;
 
@@ -2435,7 +2693,9 @@ fn export_command(cli: &Cli, kind: &ExportKind) -> Result<()> {
                     der
                 }
             } else {
-                if pkcs12_password.password_env.is_some() || pkcs12_password.password_file.is_some()
+                if pkcs12_password.password.is_some()
+                    || pkcs12_password.password_env.is_some()
+                    || pkcs12_password.password_file.is_some()
                 {
                     return Err(Error::other("a PKCS#12 password source requires --pkcs12"));
                 }

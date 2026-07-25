@@ -21,6 +21,60 @@ pub struct Identity {
     pub friendly_name: Option<String>,
 }
 
+impl Identity {
+    /// Decode a certificate followed by an unencrypted PKCS#8 private key.
+    pub fn from_pem(data: &[u8]) -> Result<Self> {
+        Ok(Self {
+            certificate: crate::der::pem_block(data, crate::der::PEM_CERTIFICATE)?,
+            private_key: crate::der::pem_block(data, crate::der::PEM_PRIVATE_KEY)?,
+            friendly_name: None,
+        })
+    }
+
+    /// Encode the identity as a certificate and unencrypted PKCS#8 key in PEM.
+    pub fn to_pem(&self) -> String {
+        let mut output = crate::der::to_pem(crate::der::PEM_CERTIFICATE, &self.certificate);
+        output.push_str(&crate::der::to_pem(
+            crate::der::PEM_PRIVATE_KEY,
+            &self.private_key,
+        ));
+        output
+    }
+
+    /// Encode the identity as a DER PKCS#12/PFX container.
+    pub fn to_pkcs12(&self, password: &str) -> Result<Vec<u8>> {
+        encode(self, password)
+    }
+
+    /// Encode the identity as a PEM-wrapped PKCS#12/PFX container.
+    pub fn to_pkcs12_pem(&self, password: &str) -> Result<String> {
+        Ok(crate::der::to_pem(
+            crate::der::PEM_PKCS12,
+            &self.to_pkcs12(password)?,
+        ))
+    }
+}
+
+/// Whether `data` contains a certificate and unencrypted PKCS#8 key in PEM.
+pub fn is_combined_pem(data: &[u8]) -> bool {
+    std::str::from_utf8(data).is_ok_and(|text| {
+        text.contains("-----BEGIN CERTIFICATE-----") && text.contains("-----BEGIN PRIVATE KEY-----")
+    })
+}
+
+/// Decode a combined PEM identity or a PEM/DER PKCS#12 container.
+///
+/// Combined PEM does not use `password`. PKCS#12 requires it, including when
+/// the container was created with an empty password.
+pub fn decode_identity(data: &[u8], password: Option<&str>) -> Result<Identity> {
+    if is_combined_pem(data) {
+        return Identity::from_pem(data);
+    }
+    let password =
+        password.ok_or_else(|| Error::other("a PKCS#12 identity requires a password"))?;
+    decode(&crate::der::pem_or_der(data)?, password)
+}
+
 /// Decode the single identity in a PKCS#12/PFX container.
 ///
 /// Certificate-only entries and certificates forming the selected identity's
@@ -76,4 +130,25 @@ pub fn encode(identity: &Identity, password: &str) -> Result<Vec<u8>> {
         .writer(password)
         .write()
         .map_err(|error| Error::other(format!("could not encode PKCS#12: {error}")))
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn combined_pem_round_trips_through_the_high_level_api() {
+        let identity = Identity {
+            certificate: vec![1, 2, 3],
+            private_key: vec![4, 5, 6],
+            friendly_name: None,
+        };
+        let pem = identity.to_pem();
+        assert_eq!(decode_identity(pem.as_bytes(), None).unwrap(), identity);
+    }
+
+    #[test]
+    fn a_container_requires_an_explicit_password() {
+        assert!(decode_identity(&[0x30, 0], None).is_err());
+    }
 }

@@ -68,12 +68,6 @@ fn the_password_can_come_from_an_environment_variable() {
     let as_str = path.to_str().expect("utf-8 path");
 
     // Including for `create`, which is where the password is chosen.
-    let output = kc_with_env(&["create", "-e", "KC_TEST_PW"], &[("KC_TEST_PW", "envpw")]);
-    assert!(
-        !output.status.success(),
-        "the keychain argument is required"
-    );
-
     let output = kc_with_env(
         &["create", "-e", "KC_TEST_PW", as_str],
         &[("KC_TEST_PW", "envpw")],
@@ -268,25 +262,21 @@ fn the_password_sources_are_mutually_exclusive() {
 }
 
 #[test]
-fn there_is_no_way_to_pass_the_password_as_an_argument() {
-    let dir = TempDir::new("options-no-argv");
+fn the_password_can_be_supplied_directly() {
+    let dir = TempDir::new("options-argv");
     let path = dir.join("k.keychain");
     let as_str = path.to_str().expect("utf-8 path");
     kc_ok(&["create", as_str], Some("pw"));
 
-    // `ps` shows argv to every user on the machine, so the password has no flag
-    // of its own — not even one that warns.
     for args in [
         vec!["ls", "-p", "pw", as_str],
         vec!["ls", "--password", "pw", as_str],
-        vec!["find", "generic", "-a", "alice", "-p", "pw", as_str],
     ] {
         let output = kc(&args, None);
-        assert!(!output.status.success(), "{args:?} was accepted");
-        let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("unexpected argument"),
-            "unexpected error for {args:?}: {stderr}"
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 }

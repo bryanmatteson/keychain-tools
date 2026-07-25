@@ -38,6 +38,37 @@ assert_eq!(file.secret(&item)?.as_slice(), b"gh-token-abc");
 # Ok::<(), keychain::Error>(())
 ```
 
+Identity import/export uses one high-level type for combined PEM and PKCS#12:
+
+```rust
+use keychain::{Pkcs12Identity, decode_identity};
+
+// Auto-detect combined PEM or PEM/DER PKCS#12.
+let identity = decode_identity(&std::fs::read("identity.p12")?, Some("bundle-password"))?;
+let combined_pem = identity.to_pem();
+let pfx_der = identity.to_pkcs12("new-password")?;
+let pfx_pem = identity.to_pkcs12_pem("new-password")?;
+# let _: (String, Vec<u8>, String) = (combined_pem, pfx_der, pfx_pem);
+# let _: Option<Pkcs12Identity> = None;
+# Ok::<(), keychain::Error>(())
+```
+
+`KeychainLocator` supplies the CLI-compatible bare-name contract without
+implicitly reading CLI configuration:
+
+```rust
+use keychain::KeychainLocator;
+
+let locator = KeychainLocator::new([std::path::PathBuf::from(
+    "/Users/alice/Library/Keychains",
+)])?;
+assert_eq!(
+    locator.resolve("machina"),
+    std::path::PathBuf::from("/Users/alice/Library/Keychains/machina.keychain-db")
+);
+# Ok::<(), keychain::Error>(())
+```
+
 Interoperable with Apple's `security` tool in both directions. For the `kc`
 command reference, see [`kc-cli`](../kc-cli/README.md).
 

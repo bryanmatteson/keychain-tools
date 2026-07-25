@@ -23,6 +23,7 @@ pub mod edit;
 pub mod error;
 pub mod format;
 pub mod index;
+pub mod locator;
 pub mod output;
 pub mod pkcs12;
 pub mod records;
@@ -34,6 +35,11 @@ pub use db::{Info, Item, KeychainFile, Query};
 pub use edit::{ItemChanges, Settings};
 pub use error::{Error, Result};
 pub use format::{Keychain, Record, Value};
+pub use locator::{KeychainLocator, SYSTEM_KEYCHAIN};
+pub use pkcs12::{
+    Identity as Pkcs12Identity, decode as decode_pkcs12, decode_identity, encode as encode_pkcs12,
+    is_combined_pem,
+};
 pub use schema::{AttributeFormat, RecordType, Schema};
 pub use write::{CreateOptions, NewItem, create};
 

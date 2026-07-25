@@ -37,8 +37,8 @@ The final command uses Apple's `security` tool to read an item written by
 ## Commands
 
 ```text
-kc create [--idle-timeout SECS] [--no-lock-on-sleep] FILE
-kc info FILE
+kc create [--idle-timeout SECS] [--no-lock-on-sleep] [KEYCHAIN]
+kc info [KEYCHAIN]
 kc show [-d] [--all] FILE
 kc ls FILE
 kc verify FILE
@@ -79,8 +79,21 @@ kc export identity [-l LABEL] [-o FILE] [--pkcs12 [--pem]] KEYCHAIN
 kc passwd          [--new-password-env NAME] [--new-password-file FILE] FILE
 kc settings        [-t SECONDS | --no-timeout] [-l | --no-lock-on-sleep] FILE
 
+kc config show
+kc config set keychains.default KEYCHAIN
+kc config set search.paths PATH [PATH...]
+kc config append search.paths PATH [PATH...]
+kc config prepend search.paths PATH [PATH...]
 kc completions SHELL
 ```
+
+Every `KEYCHAIN` operand accepts an explicit path or a bare name. Bare names
+are searched under `~/Library/Keychains` as `NAME.keychain-db`,
+`NAME.keychain`, then `NAME`; additional directories can be set with
+`kc config set search.paths "path1" "path2"`. `system` means
+`/Library/Keychains/System.keychain`. When the operand is omitted, `login` is
+used unless changed with `kc config set keychains.default machina`; settings
+are stored in `~/.config/keychain.kdl`.
 
 `SELECTOR` is the same set of flags for every mutating command — the way `find`
 names an item, in one place:
@@ -123,27 +136,26 @@ refuses before writing anything if the old password is wrong.
 
 ### Supplying the keychain password
 
-Commands that decrypt or modify data accept the keychain password from one of
-three mutually exclusive sources:
+Commands that decrypt or modify data accept mutually exclusive password
+sources:
 
 ```bash
+kc find generic -a alice -w -p login
+kc find generic -a alice -w -p "$(secret-tool lookup kc login)" login
 kc find generic -a alice -w -e KC_PASSWORD ~/demo.keychain
 kc find generic -a alice -w -f ~/.kc-pw    ~/demo.keychain
 kc find generic -a alice -w -f -           ~/demo.keychain
 ```
 
+- `-p` prompts without echoing.
+- `-p PASSWORD` supplies a value directly. It is visible in process arguments;
+  prefer a shell expression such as `-p "$(command)"`, or use `-e`/`-f`.
 - `-e NAME` reads the password from an environment variable.
 - `-f FILE` reads the first line of a file.
 - `-f -` reads the password from standard input.
 
-Without either option, `kc` reads from standard input when it is connected to a
+Without an option, `kc` reads from standard input when it is connected to a
 pipe and prompts when it is connected to a terminal.
-
-There is no option that places the keychain password directly in the process
-arguments. Command arguments are visible to other processes and are often
-retained in shell history. The optional `-w SECRET` form for an item secret has
-the same exposure; omit it to read the secret interactively or from standard
-input.
 
 ### Querying attributes
 
@@ -164,9 +176,9 @@ kc add identity --pkcs12 identity.p12 \
   --pkcs12-password-env P12_PASSWORD ~/demo.keychain
 ```
 
-The PKCS#12 password can come from
-`--pkcs12-password-env NAME` or `--pkcs12-password-file FILE`; otherwise it is
-read from a pipe or prompted for. It is never accepted directly in `argv`.
+The PKCS#12 password can come from `--pkcs12-password[=PASSWORD]`,
+`--pkcs12-password-env NAME`, or `--pkcs12-password-file FILE`; otherwise it is
+read from a pipe or prompted for.
 Containers with multiple identities are refused rather than choosing one
 implicitly. The bundle's friendly name becomes the identity label unless
 `--label` overrides it.
@@ -177,8 +189,8 @@ DER representation or PEM with a `PKCS12` label. `kc export identity` writes
 combined PEM by default; `--pkcs12` writes encrypted DER PKCS#12, and
 `--pkcs12 --pem` writes the same container in PEM form.
 
-PKCS#12 support is provided by `keychain-rs 0.2.1`; publish that crate before
-packaging `kc-cli 0.3.1`, then run `mise run kc-cli:package`.
+PKCS#12 support is provided by `keychain-rs 0.2.2`; publish that crate before
+packaging `kc-cli 0.3.2`, then run `mise run kc-cli:package`.
 
 ### Output formats
 
