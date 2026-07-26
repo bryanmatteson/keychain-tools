@@ -22,11 +22,11 @@ pub struct Identity {
 }
 
 impl Identity {
-    /// Decode a certificate followed by an unencrypted PKCS#8 private key.
+    /// Decode a certificate followed by an unencrypted PKCS#8 or PKCS#1 RSA key.
     pub fn from_pem(data: &[u8]) -> Result<Self> {
         Ok(Self {
             certificate: crate::der::pem_block(data, crate::der::PEM_CERTIFICATE)?,
-            private_key: crate::der::pem_block(data, crate::der::PEM_PRIVATE_KEY)?,
+            private_key: crate::der::decode_private_key(data)?,
             friendly_name: None,
         })
     }
@@ -55,10 +55,12 @@ impl Identity {
     }
 }
 
-/// Whether `data` contains a certificate and unencrypted PKCS#8 key in PEM.
+/// Whether `data` contains a certificate and an unencrypted RSA key in PEM.
 pub fn is_combined_pem(data: &[u8]) -> bool {
     std::str::from_utf8(data).is_ok_and(|text| {
-        text.contains("-----BEGIN CERTIFICATE-----") && text.contains("-----BEGIN PRIVATE KEY-----")
+        text.contains("-----BEGIN CERTIFICATE-----")
+            && (text.contains("-----BEGIN PRIVATE KEY-----")
+                || text.contains("-----BEGIN RSA PRIVATE KEY-----"))
     })
 }
 
@@ -136,15 +138,41 @@ pub fn encode(identity: &Identity, password: &str) -> Result<Vec<u8>> {
 mod identity_tests {
     use super::*;
 
+    fn pkcs1_rsa_key() -> Vec<u8> {
+        let mut key = vec![0x30, 0x1b, 0x02, 0x01, 0x00];
+        for value in 1..=8 {
+            key.extend_from_slice(&[0x02, 0x01, value]);
+        }
+        key
+    }
+
     #[test]
     fn combined_pem_round_trips_through_the_high_level_api() {
         let identity = Identity {
             certificate: vec![1, 2, 3],
-            private_key: vec![4, 5, 6],
+            private_key: crate::der::decode_private_key(&pkcs1_rsa_key()).unwrap(),
             friendly_name: None,
         };
         let pem = identity.to_pem();
         assert_eq!(decode_identity(pem.as_bytes(), None).unwrap(), identity);
+    }
+
+    #[test]
+    fn combined_pem_accepts_a_traditional_rsa_private_key() {
+        let certificate = vec![1, 2, 3];
+        let pkcs1 = pkcs1_rsa_key();
+        let pem = format!(
+            "{}{}",
+            crate::der::to_pem(crate::der::PEM_CERTIFICATE, &certificate),
+            crate::der::to_pem("RSA PRIVATE KEY", &pkcs1),
+        );
+
+        assert!(is_combined_pem(pem.as_bytes()));
+        let identity = decode_identity(pem.as_bytes(), None).expect("decode combined PEM");
+        assert_eq!(identity.certificate, certificate);
+        let key = crate::der::PrivateKeyInfo::parse(&identity.private_key).expect("parse PKCS#8");
+        assert!(key.is_rsa());
+        assert_eq!(key.private_key, pkcs1);
     }
 
     #[test]

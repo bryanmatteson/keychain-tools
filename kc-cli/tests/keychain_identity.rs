@@ -16,6 +16,7 @@ use common::{
 use keychain::crypto::KeyBlob;
 use keychain::der;
 use keychain::{KeychainFile, RecordType, Value};
+use std::process::Command;
 
 /// The attributes of a record, by attribute name.
 fn attributes(file: &KeychainFile, record_type: RecordType, number: u32) -> Vec<(String, Value)> {
@@ -160,6 +161,71 @@ fn kc_writes_the_records_security_import_writes() {
         "index regions match"
     );
     assert_eq!(our_table.free_list_head, their_table.free_list_head);
+}
+
+#[test]
+fn traditional_pkcs1_rsa_keys_work_with_pem_and_der_certificates() {
+    let dir = TempDir::new("identity-pkcs1");
+    let (certificate_pem, key_pkcs8) = generate_identity(&dir, "id", "kc identity traditional RSA");
+    let certificate_der = dir.join("id-cert.der");
+    let key_pem = dir.join("id-key-rsa.pem");
+    let key_der = dir.join("id-key-rsa.der");
+
+    for output in [
+        Command::new("/usr/bin/openssl")
+            .args(["x509", "-in"])
+            .arg(&certificate_pem)
+            .args(["-outform", "DER", "-out"])
+            .arg(&certificate_der)
+            .output()
+            .expect("convert certificate to DER"),
+        Command::new("/usr/bin/openssl")
+            .args(["rsa", "-in"])
+            .arg(&key_pkcs8)
+            .arg("-out")
+            .arg(&key_pem)
+            .output()
+            .expect("convert key to PKCS#1 PEM"),
+        Command::new("/usr/bin/openssl")
+            .args(["rsa", "-in"])
+            .arg(&key_pkcs8)
+            .args(["-outform", "DER", "-out"])
+            .arg(&key_der)
+            .output()
+            .expect("convert key to PKCS#1 DER"),
+    ] {
+        assert!(
+            output.status.success(),
+            "openssl conversion failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    for (name, certificate, key) in [
+        ("pem.keychain", &certificate_pem, &key_pem),
+        ("der.keychain", &certificate_der, &key_der),
+    ] {
+        let keychain = dir.join(name);
+        kc_ok(
+            &["create", keychain.to_str().expect("utf-8 path")],
+            Some("pw"),
+        );
+        kc_ok(
+            &[
+                "add",
+                "identity",
+                "--cert",
+                certificate.to_str().expect("utf-8 path"),
+                "--key",
+                key.to_str().expect("utf-8 path"),
+                keychain.to_str().expect("utf-8 path"),
+            ],
+            Some("pw"),
+        );
+
+        let file = KeychainFile::open(&keychain).expect("open keychain");
+        assert_eq!(file.identities().len(), 1);
+    }
 }
 
 #[test]

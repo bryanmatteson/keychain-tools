@@ -1,5 +1,15 @@
 # Changelog
 
+## kc-cli 0.4.1
+
+- Accept traditional PKCS#1 RSA private keys in PEM or DER form anywhere an
+  identity import accepts a private key, normalizing them to PKCS#8 for storage.
+
+## keychain-rs 0.2.4
+
+- Add `decode_private_key` as the canonical PEM/DER, PKCS#8/PKCS#1 RSA
+  normalization entrypoint and use it for combined PEM identities.
+
 ## kc-cli 0.4.0
 
 Breaking CLI changes:

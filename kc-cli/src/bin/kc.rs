@@ -1072,7 +1072,7 @@ enum AddKind {
             conflicts_with = "pkcs12"
         )]
         certificate: Option<PathBuf>,
-        /// Private key file: an unencrypted PKCS#8 `PrivateKeyInfo`, PEM or DER
+        /// Private key file: an unencrypted PKCS#8 or PKCS#1 RSA key, PEM or DER
         #[arg(
             short = 'k',
             long = "key",
@@ -2176,7 +2176,7 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
                     .expect("clap requires --key when --pkcs12 is absent");
                 NewIdentity {
                     certificate: read_der(certificate, keychain::der::PEM_CERTIFICATE)?,
-                    private_key: read_der(key, keychain::der::PEM_PRIVATE_KEY)?,
+                    private_key: read_private_key(key)?,
                     label: label.clone(),
                     trusted_applications: trusted,
                 }
@@ -2442,6 +2442,12 @@ fn read_der(path: &Path, label: &str) -> Result<Vec<u8>> {
     let bytes = std::fs::read(path)
         .map_err(|source| Error::io(format!("could not read {}", path.display()), source))?;
     keychain::der::pem_block(&bytes, label)
+}
+
+fn read_private_key(path: &Path) -> Result<Vec<u8>> {
+    let bytes = std::fs::read(path)
+        .map_err(|source| Error::io(format!("could not read {}", path.display()), source))?;
+    keychain::der::decode_private_key(&bytes)
 }
 
 fn find(

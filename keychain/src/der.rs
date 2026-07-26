@@ -323,6 +323,109 @@ impl<'a> PrivateKeyInfo<'a> {
     }
 }
 
+/// Decode an unencrypted private key from PEM or DER and return PKCS#8 DER.
+///
+/// macOS tooling commonly emits either PKCS#8 `PRIVATE KEY` files or
+/// traditional PKCS#1 `RSA PRIVATE KEY` files. Keychain private-key records use
+/// PKCS#8, so traditional RSA keys are wrapped in a `PrivateKeyInfo` without
+/// changing their key material.
+pub fn decode_private_key(data: &[u8]) -> Result<Vec<u8>> {
+    let label = std::str::from_utf8(data)
+        .ok()
+        .and_then(|text| {
+            text.contains("-----BEGIN RSA PRIVATE KEY-----")
+                .then_some("RSA PRIVATE KEY")
+        })
+        .unwrap_or(PEM_PRIVATE_KEY);
+    let der = pem_block(data, label)
+        .map_err(|error| Error::other(format!("could not decode private key: {error}")))?;
+    if PrivateKeyInfo::parse(&der).is_ok() {
+        return Ok(der);
+    }
+    if !is_pkcs1_rsa_private_key(&der) {
+        return Err(Error::other(
+            "unsupported private key: expected an unencrypted PKCS#8 or PKCS#1 RSA key \
+             in PEM or DER form",
+        ));
+    }
+
+    // PrivateKeyInfo ::= SEQUENCE {
+    //   version                   INTEGER 0,
+    //   privateKeyAlgorithm       AlgorithmIdentifier { rsaEncryption, NULL },
+    //   privateKey                OCTET STRING -- the RSAPrivateKey
+    // }
+    const VERSION: &[u8] = &[0x02, 0x01, 0x00];
+    const RSA_ALGORITHM: &[u8] = &[
+        0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00,
+    ];
+    let mut body = Vec::with_capacity(VERSION.len() + RSA_ALGORITHM.len() + der.len() + 8);
+    body.extend_from_slice(VERSION);
+    body.extend_from_slice(RSA_ALGORITHM);
+    push_der_element(&mut body, tag::OCTET_STRING, &der);
+
+    let mut pkcs8 = Vec::with_capacity(body.len() + 8);
+    push_der_element(&mut pkcs8, tag::SEQUENCE, &body);
+    Ok(pkcs8)
+}
+
+fn is_pkcs1_rsa_private_key(data: &[u8]) -> bool {
+    let Ok(sequence) = read_tagged(data, 0, tag::SEQUENCE) else {
+        return false;
+    };
+    if sequence.next != data.len() {
+        return false;
+    }
+    let Ok(version) = read_tagged(data, sequence.start, tag::INTEGER) else {
+        return false;
+    };
+    if !matches!(version.contents(data), [0] | [1]) {
+        return false;
+    }
+
+    // RSAPrivateKey has eight required INTEGERs after its version: modulus,
+    // publicExponent, privateExponent, both primes, both exponents, coefficient.
+    let mut at = version.next;
+    for _ in 0..8 {
+        let Ok(integer) = read_tagged(data, at, tag::INTEGER) else {
+            return false;
+        };
+        if integer.is_empty() {
+            return false;
+        }
+        at = integer.next;
+    }
+
+    if version.contents(data) == [0] {
+        at == sequence.end
+    } else {
+        // Multi-prime RSA adds OtherPrimeInfos after the required integers.
+        read_tagged(data, at, tag::SEQUENCE)
+            .is_ok_and(|other_primes| other_primes.next == sequence.end)
+    }
+}
+
+fn push_der_element(output: &mut Vec<u8>, tag: u8, contents: &[u8]) {
+    output.push(tag);
+    push_der_length(output, contents.len());
+    output.extend_from_slice(contents);
+}
+
+fn push_der_length(output: &mut Vec<u8>, length: usize) {
+    if length < 0x80 {
+        output.push(length as u8);
+        return;
+    }
+
+    let bytes = length.to_be_bytes();
+    let significant = bytes
+        .iter()
+        .position(|byte| *byte != 0)
+        .unwrap_or(bytes.len() - 1);
+    let bytes = &bytes[significant..];
+    output.push(0x80 | bytes.len() as u8);
+    output.extend_from_slice(bytes);
+}
+
 /// The DER inside the PEM block with the given label, when the input is PEM.
 ///
 /// A file may hold a certificate and a key together — `kc export identity`
@@ -547,6 +650,46 @@ mod tests {
         let certificate = certificate();
         // A certificate is a SEQUENCE too, but not a PrivateKeyInfo.
         assert!(PrivateKeyInfo::parse(&certificate).is_err());
+    }
+
+    #[test]
+    fn pkcs1_rsa_private_keys_are_normalized_to_pkcs8() {
+        // Structurally complete PKCS#1 is enough to exercise normalization;
+        // integration tests use a real OpenSSL-generated RSA key.
+        let mut body = vec![0x02, 0x01, 0x00];
+        for value in 1..=8 {
+            body.extend_from_slice(&[0x02, 0x01, value]);
+        }
+        let mut pkcs1 = Vec::new();
+        push_der_element(&mut pkcs1, tag::SEQUENCE, &body);
+
+        for input in [
+            pkcs1.clone(),
+            to_pem("RSA PRIVATE KEY", &pkcs1).into_bytes(),
+        ] {
+            let pkcs8 = decode_private_key(&input).expect("normalize PKCS#1");
+            let parsed = PrivateKeyInfo::parse(&pkcs8).expect("parse PKCS#8");
+            assert!(parsed.is_rsa());
+            assert_eq!(parsed.private_key, pkcs1);
+        }
+    }
+
+    #[test]
+    fn pkcs8_private_keys_pass_through_unchanged() {
+        let mut rsa = vec![0x02, 0x01, 0x00];
+        for value in 1..=8 {
+            rsa.extend_from_slice(&[0x02, 0x01, value]);
+        }
+        let mut pkcs1 = Vec::new();
+        push_der_element(&mut pkcs1, tag::SEQUENCE, &rsa);
+        let pkcs8 = decode_private_key(&pkcs1).expect("wrap PKCS#1");
+
+        assert_eq!(decode_private_key(&pkcs8).expect("read PKCS#8"), pkcs8);
+        assert_eq!(
+            decode_private_key(to_pem(PEM_PRIVATE_KEY, &pkcs8).as_bytes())
+                .expect("read PKCS#8 PEM"),
+            pkcs8
+        );
     }
 
     #[test]

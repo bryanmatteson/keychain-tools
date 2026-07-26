@@ -38,7 +38,9 @@ assert_eq!(file.secret(&item)?.as_slice(), b"gh-token-abc");
 # Ok::<(), keychain::Error>(())
 ```
 
-Identity import/export uses one high-level type for combined PEM and PKCS#12:
+Identity import/export uses one high-level type for combined PEM and PKCS#12.
+Combined PEM accepts unencrypted PKCS#8 `PRIVATE KEY` and traditional PKCS#1
+`RSA PRIVATE KEY` blocks:
 
 ```rust
 use keychain::{Pkcs12Identity, decode_identity};

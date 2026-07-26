@@ -217,8 +217,9 @@ an integer. Repeat the option to require multiple attributes.
 
 ### Adding identities
 
-`kc add identity` accepts either a certificate plus an unencrypted PKCS#8
-private key in PEM or DER form, or a PKCS#12/PFX container holding one identity:
+`kc add identity` accepts either a certificate plus an unencrypted PKCS#8 or
+traditional PKCS#1 RSA private key in PEM or DER form, or a PKCS#12/PFX
+container holding one identity:
 
 ```bash
 kc add identity -c cert.pem -k key.pem ~/demo.keychain

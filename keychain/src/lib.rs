@@ -35,6 +35,7 @@ pub mod write;
 pub use access::{AccessDecision, AccessDefault, AccessMode, AccessPolicy};
 pub use acl::{AclBlob, TrustedApplication};
 pub use db::{Info, Item, KeychainFile, Query};
+pub use der::decode_private_key;
 pub use edit::{ItemChanges, Settings, StoredIdentity};
 pub use error::{Error, Result};
 pub use format::{Keychain, Record, Value};
