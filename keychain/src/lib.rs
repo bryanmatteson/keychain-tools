@@ -33,7 +33,7 @@ pub mod secret;
 pub mod write;
 
 pub use access::{AccessDecision, AccessDefault, AccessMode, AccessPolicy};
-pub use acl::{AclBlob, TrustedApplication};
+pub use acl::{AclBlob, ApplicationAccess, TrustedApplication};
 pub use db::{Info, Item, KeychainFile, Query};
 pub use der::decode_private_key;
 pub use edit::{ItemChanges, Settings, StoredIdentity};

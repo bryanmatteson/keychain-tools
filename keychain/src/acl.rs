@@ -156,6 +156,23 @@ impl TrustedApplication {
     }
 }
 
+/// Native application authorization for an item's secret or private key.
+///
+/// These are the three distinct ACL shapes macOS writes. In particular,
+/// `Prompt` is not the same as `AllowAny`: it is the empty trusted-application
+/// list produced by `security -T ""`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ApplicationAccess {
+    /// Let every application use the item without warning (`security -A`).
+    #[default]
+    AllowAny,
+    /// Pre-authorize no application, so securityd asks the user.
+    Prompt,
+    /// Let these signed applications use the item without warning and ask for
+    /// other callers.
+    TrustedApplications(Vec<TrustedApplication>),
+}
+
 /// Who an ACL entry grants access to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Subject {
@@ -258,7 +275,7 @@ impl AclBlob {
     /// The ACL macOS writes for an item created with "allow all applications":
     /// an owner entry plus a decrypt entry and an item-operations entry.
     pub fn for_item(name: &str) -> Self {
-        Self::for_item_with_subject(name, Subject::Any)
+        Self::for_item_access(name, &ApplicationAccess::AllowAny)
     }
 
     /// The same three entries, restricted to specific applications.
@@ -268,7 +285,27 @@ impl AclBlob {
     /// Putting the applications on the wrong entry yields an ACL that parses and
     /// looks restricted while granting the item to everyone.
     pub fn for_item_trusting(name: &str, applications: Vec<TrustedApplication>) -> Self {
-        Self::for_item_with_subject(name, Subject::TrustedApplications(applications))
+        Self::for_item_access(name, &ApplicationAccess::TrustedApplications(applications))
+    }
+
+    /// The same three entries with no application pre-authorized.
+    ///
+    /// This is byte-for-byte the ACL `security -T ""` writes: securityd asks
+    /// before allowing any application to use the item.
+    pub fn for_item_prompting(name: &str) -> Self {
+        Self::for_item_access(name, &ApplicationAccess::Prompt)
+    }
+
+    /// Build the canonical ACL for one native application-access decision.
+    pub fn for_item_access(name: &str, access: &ApplicationAccess) -> Self {
+        let subject = match access {
+            ApplicationAccess::AllowAny => Subject::Any,
+            ApplicationAccess::Prompt => Subject::TrustedApplications(Vec::new()),
+            ApplicationAccess::TrustedApplications(applications) => {
+                Subject::TrustedApplications(applications.clone())
+            }
+        };
+        Self::for_item_with_subject(name, subject)
     }
 
     /// Build the standard three entries with `subject` on the entry that governs
@@ -321,6 +358,25 @@ impl AclBlob {
             match entry.subject.as_ref()? {
                 Subject::Any => Some(&[][..]),
                 Subject::TrustedApplications(applications) => Some(applications.as_slice()),
+                Subject::Unknown(_) => None,
+            }
+        })
+    }
+
+    /// Native application access from the canonical item-access entry.
+    pub fn application_access(&self) -> Option<ApplicationAccess> {
+        self.entries.iter().find_map(|entry| {
+            if entry.authorization.as_ref() != Some(&Authorization::ItemAccess) {
+                return None;
+            }
+            match entry.subject.as_ref()? {
+                Subject::Any => Some(ApplicationAccess::AllowAny),
+                Subject::TrustedApplications(applications) if applications.is_empty() => {
+                    Some(ApplicationAccess::Prompt)
+                }
+                Subject::TrustedApplications(applications) => {
+                    Some(ApplicationAccess::TrustedApplications(applications.clone()))
+                }
                 Subject::Unknown(_) => None,
             }
         })
@@ -438,9 +494,6 @@ impl WordReader<'_> {
                     "the owner entry carries {elements} subject elements"
                 )));
             }
-            EntryKind::Authorization if elements == 0 => {
-                return Err(Error::format("an authorization entry carries no subject"));
-            }
             _ => {}
         }
 
@@ -455,6 +508,9 @@ impl WordReader<'_> {
         // exactly `elements` parts.
         let subject = match kind {
             EntryKind::Owner => None,
+            EntryKind::Authorization if elements == 0 => {
+                Some(Subject::TrustedApplications(Vec::new()))
+            }
             EntryKind::Authorization => Some(self.subject(elements)?),
         };
 
@@ -829,6 +885,25 @@ mod tests {
     #[test]
     fn an_allow_any_acl_reports_no_trusted_paths() {
         assert!(AclBlob::for_item("x").trusted_paths().is_empty());
+    }
+
+    #[test]
+    fn application_access_distinguishes_allow_prompt_and_trusted() {
+        let application = TrustedApplication::new("/bin/example", vec![1, 2, 3]);
+        for access in [
+            ApplicationAccess::AllowAny,
+            ApplicationAccess::Prompt,
+            ApplicationAccess::TrustedApplications(vec![application]),
+        ] {
+            let acl = AclBlob::for_item_access("x", &access);
+            assert_eq!(acl.application_access(), Some(access.clone()));
+            assert_eq!(
+                AclBlob::parse(&acl.to_bytes())
+                    .expect("parse")
+                    .application_access(),
+                Some(access)
+            );
+        }
     }
 
     #[test]

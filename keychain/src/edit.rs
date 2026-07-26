@@ -14,7 +14,7 @@
 //!   the master keys: every item key in the file is wrapped under them, so
 //!   generating new ones would orphan every secret in the keychain.
 
-use crate::acl::{AclBlob, TrustedApplication};
+use crate::acl::{AclBlob, ApplicationAccess, TrustedApplication};
 use crate::crypto::{self, BLOCK_SIZE, DbBlob, SALT_LEN, SecretBytes, Ssgp};
 use crate::db::FOUR_CHAR_CODE_ATTRIBUTES;
 use crate::db::KeychainFile;
@@ -362,6 +362,21 @@ impl KeychainFile {
         record_number: u32,
         trusted: &[TrustedApplication],
     ) -> Result<()> {
+        let access = if trusted.is_empty() {
+            ApplicationAccess::AllowAny
+        } else {
+            ApplicationAccess::TrustedApplications(trusted.to_vec())
+        };
+        self.set_item_access(record_type, record_number, &access)
+    }
+
+    /// Rewrite an item's native application access.
+    pub fn set_item_access(
+        &mut self,
+        record_type: RecordType,
+        record_number: u32,
+        access: &ApplicationAccess,
+    ) -> Result<()> {
         let item = self
             .items_of_type(record_type)
             .into_iter()
@@ -374,7 +389,7 @@ impl KeychainFile {
                 label: hex::encode(label),
             })?;
         let name = item.label().unwrap_or_default();
-        self.set_key_record_trust(RecordType::SYMMETRIC_KEY, number, &name, trusted)
+        self.set_key_record_access(RecordType::SYMMETRIC_KEY, number, &name, access)
     }
 
     /// Rewrite the access control of a stored private key.
@@ -384,6 +399,20 @@ impl KeychainFile {
         &mut self,
         record_number: u32,
         trusted: &[TrustedApplication],
+    ) -> Result<()> {
+        let access = if trusted.is_empty() {
+            ApplicationAccess::AllowAny
+        } else {
+            ApplicationAccess::TrustedApplications(trusted.to_vec())
+        };
+        self.set_private_key_access(record_number, &access)
+    }
+
+    /// Rewrite a stored private key's native application access.
+    pub fn set_private_key_access(
+        &mut self,
+        record_number: u32,
+        access: &ApplicationAccess,
     ) -> Result<()> {
         let record = self
             .records_of_type(RecordType::PRIVATE_KEY)
@@ -396,13 +425,42 @@ impl KeychainFile {
             .and_then(Value::as_bytes)
             .map(|bytes| String::from_utf8_lossy(crate::format::trim_nul(bytes)).into_owned())
             .unwrap_or_default();
-        self.set_key_record_trust(RecordType::PRIVATE_KEY, record_number, &name, trusted)
+        self.set_key_record_access(RecordType::PRIVATE_KEY, record_number, &name, access)
+    }
+
+    /// Native application access for a password item.
+    pub fn item_application_access(
+        &self,
+        record_type: RecordType,
+        record_number: u32,
+    ) -> Result<Option<ApplicationAccess>> {
+        let item = self
+            .items_of_type(record_type)
+            .into_iter()
+            .find(|item| item.number() == record_number)
+            .ok_or(Error::NoSuchItem)?;
+        let label = Ssgp::parse(&item.record.key_data)?.label;
+        let number = self
+            .key_record_number(&label)
+            .ok_or_else(|| Error::MissingItemKey {
+                label: hex::encode(label),
+            })?;
+        self.key_record_application_access(RecordType::SYMMETRIC_KEY, number)
+    }
+
+    /// Native application access for a stored private key.
+    pub fn private_key_application_access(
+        &self,
+        record_number: u32,
+    ) -> Result<Option<ApplicationAccess>> {
+        self.key_record_application_access(RecordType::PRIVATE_KEY, record_number)
     }
 
     /// Native ACL applications for a password item.
     ///
     /// `None` means the ACL was not in the canonical form this library models;
-    /// an empty vector means any application.
+    /// an empty vector may mean allow-any or prompt-all. Use
+    /// [`KeychainFile::item_application_access`] to distinguish them.
     pub fn item_trusted_applications(
         &self,
         record_type: RecordType,
@@ -445,12 +503,27 @@ impl KeychainFile {
         Ok(blob.public_acl.trusted_applications().map(<[_]>::to_vec))
     }
 
-    fn set_key_record_trust(
+    fn key_record_application_access(
+        &self,
+        record_type: RecordType,
+        record_number: u32,
+    ) -> Result<Option<ApplicationAccess>> {
+        let blob = self
+            .records_of_type(record_type)
+            .into_iter()
+            .find(|record| record.number == record_number)
+            .map(|record| crypto::KeyBlob::parse(&record.key_data))
+            .transpose()?
+            .ok_or(Error::NoSuchItem)?;
+        Ok(blob.public_acl.application_access())
+    }
+
+    fn set_key_record_access(
         &mut self,
         record_type: RecordType,
         record_number: u32,
         fallback_name: &str,
-        trusted: &[TrustedApplication],
+        access: &ApplicationAccess,
     ) -> Result<()> {
         let keys = self.keys().ok_or(Error::Locked)?;
         let signing_key = SecretBytes::new(keys.signing_key.as_slice());
@@ -479,11 +552,7 @@ impl KeychainFile {
             .map(str::to_string)
             .unwrap_or_else(|| fallback_name.to_string());
 
-        let acl = if trusted.is_empty() {
-            AclBlob::for_item(&name)
-        } else {
-            AclBlob::for_item_trusting(&name, trusted.to_vec())
-        };
+        let acl = AclBlob::for_item_access(&name, access);
 
         let keychain = self.keychain_mut();
         keychain.bump_commit_version();

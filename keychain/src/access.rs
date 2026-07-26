@@ -6,7 +6,7 @@
 //! desired. The library deliberately returns decisions instead of prompting:
 //! terminal UI belongs to callers such as `kc`.
 
-use crate::acl::TrustedApplication;
+use crate::acl::{ApplicationAccess, TrustedApplication};
 
 /// How a keychain-wide policy is enforced.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -89,9 +89,26 @@ impl AccessPolicy {
 
     /// Applications to place in a native item ACL.
     ///
-    /// An empty list has Apple's established "allow any application" meaning.
+    /// This legacy slice view cannot distinguish allow-any from prompt-all when
+    /// it is empty; prefer [`AccessPolicy::native_application_access`].
     pub fn native_trusted_applications(&self) -> &[TrustedApplication] {
         &self.trusted_applications
+    }
+
+    /// Native ACL that best represents this policy.
+    ///
+    /// A non-empty trusted list lets those applications through and prompts
+    /// others. With no trusted applications, `allow` maps to allow-any while
+    /// `prompt` and `deny` pre-authorize nobody; direct readers still enforce an
+    /// unconditional deny themselves.
+    pub fn native_application_access(&self) -> ApplicationAccess {
+        if !self.trusted_applications.is_empty() {
+            return ApplicationAccess::TrustedApplications(self.trusted_applications.clone());
+        }
+        match self.default {
+            AccessDefault::Allow => ApplicationAccess::AllowAny,
+            AccessDefault::Prompt | AccessDefault::Deny => ApplicationAccess::Prompt,
+        }
     }
 }
 

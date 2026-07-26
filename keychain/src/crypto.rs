@@ -457,11 +457,20 @@ impl PublicAcl {
 
     /// Applications from the canonical item-access entry.
     ///
-    /// `None` means the ACL was not understood; an empty slice means any
-    /// application.
+    /// `None` means the ACL was not understood. An empty slice may mean either
+    /// allow-any or prompt-all; use [`PublicAcl::application_access`] when that
+    /// distinction matters.
     pub fn trusted_applications(&self) -> Option<&[crate::acl::TrustedApplication]> {
         match self {
             Self::Parsed(blob) => blob.trusted_applications(),
+            Self::Raw(_) => None,
+        }
+    }
+
+    /// Distinguish allow-any, prompt, and trusted-application ACLs.
+    pub fn application_access(&self) -> Option<crate::acl::ApplicationAccess> {
+        match self {
+            Self::Parsed(blob) => blob.application_access(),
             Self::Raw(_) => None,
         }
     }

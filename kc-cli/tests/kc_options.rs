@@ -69,7 +69,7 @@ fn the_password_can_come_from_an_environment_variable() {
 
     // Including for `create`, which is where the password is chosen.
     let output = kc_with_env(
-        &["create", "-e", "KC_TEST_PW", as_str],
+        &["create", "--no-access-policy", "-e", "KC_TEST_PW", as_str],
         &[("KC_TEST_PW", "envpw")],
     );
     assert!(

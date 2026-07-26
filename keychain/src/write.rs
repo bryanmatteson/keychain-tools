@@ -16,7 +16,7 @@
 //! offsets are table-relative: a stale index region sends macOS into the middle
 //! of a record and it reports `errSecNoSuchAttr`.
 
-use crate::acl::{AclBlob, TrustedApplication};
+use crate::acl::{AclBlob, ApplicationAccess, TrustedApplication};
 use crate::apple_schema::{self, RECORD_VERSION};
 use crate::crypto::{
     self, BLOB_VERSION, BLOCK_SIZE, DbBlob, DbKeys, KEY_LEN, SALT_LEN, SecretBytes, Ssgp,
@@ -358,6 +358,26 @@ impl KeychainFile {
         secret: &[u8],
         timestamp: &str,
     ) -> Result<()> {
+        let access = if item.trusted_applications.is_empty() {
+            ApplicationAccess::AllowAny
+        } else {
+            ApplicationAccess::TrustedApplications(item.trusted_applications.clone())
+        };
+        self.add_password_with_access(record_type, item, secret, timestamp, &access)
+    }
+
+    /// Store a password item with an explicit native application-access policy.
+    ///
+    /// Unlike [`KeychainFile::add_password`], this distinguishes an allow-any
+    /// ACL from an empty trusted-application list that prompts every caller.
+    pub fn add_password_with_access(
+        &mut self,
+        record_type: RecordType,
+        item: &NewItem,
+        secret: &[u8],
+        timestamp: &str,
+        access: &ApplicationAccess,
+    ) -> Result<()> {
         let keys = self.keys().ok_or(Error::Locked)?;
         let encryption_key = SecretBytes::new(keys.encryption_key.as_slice());
         let signing_key = SecretBytes::new(keys.signing_key.as_slice());
@@ -382,7 +402,7 @@ impl KeychainFile {
             encryption_key.as_slice(),
             signing_key.as_slice(),
             &print_name,
-            &item.trusted_applications,
+            access,
         )?;
 
         let mut ssgp_iv = [0u8; BLOCK_SIZE];
@@ -474,6 +494,23 @@ impl KeychainFile {
     /// Requires an unlocked keychain: the private key is wrapped with the
     /// database's encryption key, and both blobs are signed with its signing key.
     pub fn add_identity(&mut self, identity: &NewIdentity) -> Result<[u8; 20]> {
+        let access = if identity.trusted_applications.is_empty() {
+            ApplicationAccess::AllowAny
+        } else {
+            ApplicationAccess::TrustedApplications(identity.trusted_applications.clone())
+        };
+        self.add_identity_with_access(identity, &access)
+    }
+
+    /// Store an identity with an explicit native application-access policy.
+    ///
+    /// This preserves the distinction between allow-any and prompt-every-caller
+    /// ACLs while keeping [`KeychainFile::add_identity`] backward compatible.
+    pub fn add_identity_with_access(
+        &mut self,
+        identity: &NewIdentity,
+        access: &ApplicationAccess,
+    ) -> Result<[u8; 20]> {
         self.ensure_relation(RecordType::X509_CERTIFICATE)?;
 
         let keys = self.keys().ok_or(Error::Locked)?;
@@ -521,7 +558,7 @@ impl KeychainFile {
             signing_key.as_slice(),
             &label,
             key_size,
-            &identity.trusted_applications,
+            access,
         )?;
 
         let keychain = self.keychain_mut();
@@ -666,7 +703,7 @@ impl KeychainFile {
         signing_key: &[u8],
         label: &str,
         key_size: u32,
-        trusted: &[TrustedApplication],
+        access: &ApplicationAccess,
     ) -> Result<Vec<u8>> {
         let mut iv = [0u8; BLOCK_SIZE];
         iv.copy_from_slice(&crate::secret::random_bytes(BLOCK_SIZE));
@@ -679,11 +716,7 @@ impl KeychainFile {
             header: KeyHeader::private_key(key_size),
             wrapped: WrappedKeyFields::item_key(),
             blob_signature: [0u8; 20],
-            public_acl: crypto::PublicAcl::Parsed(if trusted.is_empty() {
-                AclBlob::for_item(label)
-            } else {
-                AclBlob::for_item_trusting(label, trusted.to_vec())
-            }),
+            public_acl: crypto::PublicAcl::Parsed(AclBlob::for_item_access(label, access)),
             crypto_blob: crypto::wrap_blob(encryption_key, &iv, private_key)?,
         };
         blob.sign(signing_key);
@@ -699,7 +732,7 @@ impl KeychainFile {
         encryption_key: &[u8],
         signing_key: &[u8],
         print_name: &str,
-        trusted: &[TrustedApplication],
+        access: &ApplicationAccess,
     ) -> Result<Vec<u8>> {
         let mut iv = [0u8; BLOCK_SIZE];
         iv.copy_from_slice(&crate::secret::random_bytes(BLOCK_SIZE));
@@ -712,11 +745,7 @@ impl KeychainFile {
             header: KeyHeader::item_key(),
             wrapped: WrappedKeyFields::item_key(),
             blob_signature: [0u8; 20],
-            public_acl: crypto::PublicAcl::Parsed(if trusted.is_empty() {
-                AclBlob::for_item(print_name)
-            } else {
-                AclBlob::for_item_trusting(print_name, trusted.to_vec())
-            }),
+            public_acl: crypto::PublicAcl::Parsed(AclBlob::for_item_access(print_name, access)),
             crypto_blob: crypto::wrap_key(encryption_key, &iv, item_key.as_slice())?,
         };
         blob.sign(signing_key);

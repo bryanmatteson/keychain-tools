@@ -58,7 +58,9 @@ let pfx_pem = identity.to_pkcs12_pem("new-password")?;
 Keychain-wide policy is separate from Apple's per-item ACL representation:
 
 ```rust
-use keychain::{AccessDefault, AccessMode, AccessPolicy, TrustedApplication};
+use keychain::{
+    AccessDefault, AccessMode, AccessPolicy, ApplicationAccess, TrustedApplication,
+};
 
 let policy = AccessPolicy {
     mode: AccessMode::Hybrid,
@@ -67,12 +69,15 @@ let policy = AccessPolicy {
 };
 assert!(policy.mode.enforces_direct());
 assert!(policy.mode.projects_native());
+assert_eq!(policy.native_application_access(), ApplicationAccess::Prompt);
 ```
 
 The library returns an `AccessDecision`; it never owns terminal interaction.
-Use `KeychainFile::set_item_trust` and `set_private_key_trust` to project a
-policy to native ACLs, and `item_trusted_applications` /
-`private_key_trusted_applications` to audit them.
+Use `KeychainFile::set_item_access` and `set_private_key_access` to project a
+policy to native ACLs, and `item_application_access` /
+`private_key_application_access` to distinguish allow-any, prompt, and trusted
+applications when auditing. The older `*_trust` methods retain their
+empty-means-allow-any behavior.
 
 `KeychainLocator` supplies the CLI-compatible bare-name contract without
 implicitly reading CLI configuration:

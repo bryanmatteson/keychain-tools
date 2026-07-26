@@ -358,6 +358,18 @@ enum Command {
         #[arg(long, action = ArgAction::SetTrue)]
         no_lock_on_sleep: bool,
 
+        /// Keychain-wide enforcement mode [default: hybrid]
+        #[arg(long, value_enum, default_value = "hybrid")]
+        access_mode: CliAccessMode,
+
+        /// Default secret-access decision [default: prompt]
+        #[arg(long, value_enum, default_value = "prompt")]
+        access_default: CliAccessDefault,
+
+        /// Create only the database, without saving an access policy
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_access_policy: bool,
+
         /// Output path or bare keychain name
         keychain: PathBuf,
     },
@@ -467,6 +479,9 @@ enum Command {
         /// Allow any application, the way `security -A` does
         #[arg(short = 'A', long, action = ArgAction::SetTrue)]
         any: bool,
+        /// Pre-authorize no application, so securityd prompts every caller
+        #[arg(long, action = ArgAction::SetTrue)]
+        prompt: bool,
 
         keychain: Option<PathBuf>,
     },
@@ -1259,9 +1274,13 @@ fn run(cli: &Cli) -> Result<()> {
             password,
             idle_timeout,
             no_lock_on_sleep,
+            access_mode,
+            access_default,
+            no_access_policy,
             keychain,
         } => {
-            let keychain = resolve_keychain(&Some(keychain.clone()))?;
+            let mut config = config::Config::load()?;
+            let keychain = config.resolve(Some(keychain))?;
             if keychain.exists() {
                 return Err(Error::other(format!(
                     "{} already exists",
@@ -1276,6 +1295,16 @@ fn run(cli: &Cli) -> Result<()> {
             };
             let file = create(password.as_bytes(), &options)?;
             file.save(&keychain)?;
+            if !no_access_policy {
+                config.set_access_policy(config::ConfiguredAccessPolicy {
+                    keychain: keychain.to_string_lossy().into_owned(),
+                    mode: (*access_mode).into(),
+                    default: (*access_default).into(),
+                    trust_apps: Vec::new(),
+                    trust_requirements: Vec::new(),
+                });
+                config.save()?;
+            }
             let generated = generated_password.then_some(password.as_str());
             report(
                 cli,
@@ -1362,25 +1391,38 @@ fn run(cli: &Cli) -> Result<()> {
             trust_apps,
             trust_requirements,
             any,
+            prompt,
             keychain,
         } => {
             let trusted = trusted_applications(trust_apps, trust_requirements)?;
-            if trusted.is_empty() && !any {
+            if trusted.is_empty() && !any && !prompt {
                 return Err(Error::other(
-                    "name at least one application with -T, or pass -A to allow any",
+                    "name an application with -T, pass --prompt, or pass -A to allow any",
                 ));
             }
-            if !trusted.is_empty() && *any {
+            if [!trusted.is_empty(), *any, *prompt]
+                .into_iter()
+                .filter(|selected| *selected)
+                .count()
+                > 1
+            {
                 return Err(Error::other(
-                    "-A allows any application; -T restricts to one",
+                    "-A, --prompt, and trusted applications are mutually exclusive",
                 ));
             }
+            let access = if *any {
+                keychain::ApplicationAccess::AllowAny
+            } else if *prompt {
+                keychain::ApplicationAccess::Prompt
+            } else {
+                keychain::ApplicationAccess::TrustedApplications(trusted)
+            };
             trust_command(
                 cli,
                 &resolve_keychain(keychain)?,
                 password,
                 selector,
-                &trusted,
+                &access,
             )
         }
 
@@ -1416,7 +1458,7 @@ fn run(cli: &Cli) -> Result<()> {
                 password,
                 destination_password,
                 selector,
-                &trusted_applications_for_write(&destination, trust_apps, trust_requirements)?,
+                &application_access_for_write(&destination, trust_apps, trust_requirements)?,
             )
         }
 
@@ -1831,12 +1873,6 @@ fn apply_access_policy(
             "securityd ACLs cannot represent an unconditional deny policy",
         ));
     }
-    if policy.default == keychain::AccessDefault::Prompt && policy.trusted_applications.is_empty() {
-        return Err(Error::other(
-            "a prompt policy needs at least one trusted application before it can be projected to securityd",
-        ));
-    }
-
     let mut file = KeychainFile::open(&path)?;
     let password = password.resolve(false)?;
     file.unlock(password.as_bytes())?;
@@ -1850,11 +1886,12 @@ fn apply_access_policy(
         .iter()
         .map(|record| record.number)
         .collect();
+    let expected = policy.native_application_access();
     for (record_type, number) in &password_items {
-        file.set_item_trust(*record_type, *number, policy.native_trusted_applications())?;
+        file.set_item_access(*record_type, *number, &expected)?;
     }
     for number in &private_keys {
-        file.set_private_key_trust(*number, policy.native_trusted_applications())?;
+        file.set_private_key_access(*number, &expected)?;
     }
     file.save(&path)?;
 
@@ -1883,14 +1920,14 @@ fn audit_access_policy(cli: &Cli, config: &config::Config, keychain: Option<&Pat
         ))
     })?;
     let file = KeychainFile::open(&path)?;
-    let expected = policy.native_trusted_applications();
+    let expected = policy.native_application_access();
     let mut total = 0usize;
     let mut matching = 0usize;
     let mut unknown = 0usize;
 
     for item in file.items() {
         total += 1;
-        match file.item_trusted_applications(item.record_type, item.number())? {
+        match file.item_application_access(item.record_type, item.number())? {
             Some(actual) if actual == expected => matching += 1,
             Some(_) => {}
             None => unknown += 1,
@@ -1899,7 +1936,7 @@ fn audit_access_policy(cli: &Cli, config: &config::Config, keychain: Option<&Pat
     for record in file.records_of_type(RecordType::PRIVATE_KEY) {
         let number = record.number;
         total += 1;
-        match file.private_key_trusted_applications(number)? {
+        match file.private_key_application_access(number)? {
             Some(actual) if actual == expected => matching += 1,
             Some(_) => {}
             None => unknown += 1,
@@ -1993,22 +2030,24 @@ fn prompt_access(keychain: &Path, operation: &str) -> Result<()> {
     }
 }
 
-fn trusted_applications_for_write(
+fn application_access_for_write(
     keychain: &Path,
     paths: &[PathBuf],
     requirements: &[String],
-) -> Result<Vec<keychain::TrustedApplication>> {
+) -> Result<keychain::ApplicationAccess> {
     if !paths.is_empty() || !requirements.is_empty() {
-        return trusted_applications(paths, requirements);
+        return Ok(keychain::ApplicationAccess::TrustedApplications(
+            trusted_applications(paths, requirements)?,
+        ));
     }
     let config = config::Config::load()?;
     let Some(policy) = resolved_access_policy(&config, keychain)? else {
-        return Ok(Vec::new());
+        return Ok(keychain::ApplicationAccess::AllowAny);
     };
     if policy.mode.projects_native() {
-        Ok(policy.trusted_applications)
+        Ok(policy.native_application_access())
     } else {
-        Ok(Vec::new())
+        Ok(keychain::ApplicationAccess::AllowAny)
     }
 }
 
@@ -2028,6 +2067,7 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
             keychain,
         } => {
             let keychain = resolve_keychain(keychain)?;
+            let access = application_access_for_write(&keychain, trust_apps, trust_requirements)?;
             let item = NewItem {
                 label: label.clone(),
                 account: Some(account.clone()),
@@ -2035,11 +2075,6 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
                 generic: generic.as_ref().map(|text| text.as_bytes().to_vec()),
                 description: kind.clone(),
                 comment: comment.clone(),
-                trusted_applications: trusted_applications_for_write(
-                    &keychain,
-                    trust_apps,
-                    trust_requirements,
-                )?,
                 ..NewItem::default()
             };
             add(
@@ -2049,6 +2084,7 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
                 RecordType::GENERIC_PASSWORD,
                 item,
                 secret,
+                &access,
             )
         }
 
@@ -2070,6 +2106,7 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
             keychain,
         } => {
             let keychain = resolve_keychain(keychain)?;
+            let access = application_access_for_write(&keychain, trust_apps, trust_requirements)?;
             let item = NewItem {
                 label: label.clone(),
                 account: Some(account.clone()),
@@ -2079,11 +2116,6 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
                 port: *port,
                 description: kind.clone(),
                 comment: comment.clone(),
-                trusted_applications: trusted_applications_for_write(
-                    &keychain,
-                    trust_apps,
-                    trust_requirements,
-                )?,
                 protocol: four_char_code(protocol.as_deref())?,
                 // `security` stores kSecAuthenticationTypeDefault when none is
                 // given, and this attribute is part of the relation's unique
@@ -2098,6 +2130,7 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
                 RecordType::INTERNET_PASSWORD,
                 item,
                 secret,
+                &access,
             )
         }
 
@@ -2118,6 +2151,7 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
             keychain,
         } => {
             let keychain = resolve_keychain(keychain)?;
+            let access = application_access_for_write(&keychain, trust_apps, trust_requirements)?;
             let item = NewItem {
                 label: label.clone(),
                 account: Some(account.clone()),
@@ -2128,11 +2162,6 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
                 protocol: four_char_code(protocol.as_deref())?,
                 description: kind.clone(),
                 comment: comment.clone(),
-                trusted_applications: trusted_applications_for_write(
-                    &keychain,
-                    trust_apps,
-                    trust_requirements,
-                )?,
                 ..NewItem::default()
             };
             add(
@@ -2142,6 +2171,7 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
                 RecordType::APPLESHARE_PASSWORD,
                 item,
                 secret,
+                &access,
             )
         }
 
@@ -2157,10 +2187,9 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
             keychain,
         } => {
             let keychain = resolve_keychain(keychain)?;
-            let trusted =
-                trusted_applications_for_write(&keychain, trust_apps, trust_requirements)?;
+            let access = application_access_for_write(&keychain, trust_apps, trust_requirements)?;
             let identity = if let Some(path) = pkcs12 {
-                identity_from_file(path, pkcs12_password, label.clone(), trusted)?
+                identity_from_file(path, pkcs12_password, label.clone(), Vec::new())?
             } else {
                 if pkcs12_password.password.is_some()
                     || pkcs12_password.password_env.is_some()
@@ -2178,10 +2207,10 @@ fn add_command(cli: &Cli, kind: &AddKind) -> Result<()> {
                     certificate: read_der(certificate, keychain::der::PEM_CERTIFICATE)?,
                     private_key: read_private_key(key)?,
                     label: label.clone(),
-                    trusted_applications: trusted,
+                    trusted_applications: Vec::new(),
                 }
             };
-            add_identity(cli, &keychain, password, &identity)
+            add_identity(cli, &keychain, password, &identity, &access)
         }
     }
 }
@@ -2198,10 +2227,9 @@ fn import_command(cli: &Cli, kind: &ImportKind) -> Result<()> {
             keychain,
         } => {
             let keychain = resolve_keychain(keychain)?;
-            let trusted =
-                trusted_applications_for_write(&keychain, trust_apps, trust_requirements)?;
-            let identity = identity_from_file(input, pkcs12_password, label.clone(), trusted)?;
-            add_identity(cli, &keychain, password, &identity)
+            let access = application_access_for_write(&keychain, trust_apps, trust_requirements)?;
+            let identity = identity_from_file(input, pkcs12_password, label.clone(), Vec::new())?;
+            add_identity(cli, &keychain, password, &identity, &access)
         }
     }
 }
@@ -2390,13 +2418,20 @@ fn add(
     record_type: RecordType,
     item: NewItem,
     secret: &Option<String>,
+    access: &keychain::ApplicationAccess,
 ) -> Result<()> {
     let mut file = KeychainFile::open(keychain)?;
     let password = password.resolve(false)?;
     file.unlock(password.as_bytes())?;
 
     let secret = item_secret(secret)?;
-    file.add_password(record_type, &item, secret.as_bytes(), &now_timestamp())?;
+    file.add_password_with_access(
+        record_type,
+        &item,
+        secret.as_bytes(),
+        &now_timestamp(),
+        access,
+    )?;
     file.save(keychain)?;
 
     report(cli, "stored", || {
@@ -2416,12 +2451,13 @@ fn add_identity(
     keychain: &Path,
     password: &PasswordSource,
     identity: &NewIdentity,
+    access: &keychain::ApplicationAccess,
 ) -> Result<()> {
     let mut file = KeychainFile::open(keychain)?;
     let password = password.resolve(false)?;
     file.unlock(password.as_bytes())?;
 
-    let public_key_hash = file.add_identity(identity)?;
+    let public_key_hash = file.add_identity_with_access(identity, access)?;
     file.save(keychain)?;
 
     report(cli, "stored", || {
@@ -3168,7 +3204,7 @@ fn trust_command(
     keychain: &Path,
     password: &PasswordSource,
     selector: &Selector,
-    trusted: &[keychain::acl::TrustedApplication],
+    access: &keychain::ApplicationAccess,
 ) -> Result<()> {
     if selector.is_empty() {
         return Err(Error::other("name the item, for example with -a and -s"));
@@ -3181,7 +3217,7 @@ fn trust_command(
         let item = file.find_one(&selector.to_query()?)?;
         (item.record_type, item.number(), item.label())
     };
-    file.set_item_trust(record_type, number, trusted)?;
+    file.set_item_access(record_type, number, access)?;
     file.save(keychain)?;
 
     report(cli, "access updated", || {
@@ -3190,10 +3226,18 @@ fn trust_command(
             "class": record_type.short_name(),
             "record": number,
             "label": label,
-            "trusted_applications": trusted
-                .iter()
-                .map(|application| application.path.clone())
-                .collect::<Vec<_>>(),
+            "access": match access {
+                keychain::ApplicationAccess::AllowAny => "allow-any",
+                keychain::ApplicationAccess::Prompt => "prompt",
+                keychain::ApplicationAccess::TrustedApplications(_) => "trusted-applications",
+            },
+            "trusted_applications": match access {
+                keychain::ApplicationAccess::TrustedApplications(applications) => applications
+                    .iter()
+                    .map(|application| application.path.clone())
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            },
         })
     });
     Ok(())
@@ -3212,7 +3256,7 @@ fn copy_command(
     from: &PasswordSource,
     to: DestinationPassword<'_>,
     selector: &Selector,
-    trusted: &[keychain::acl::TrustedApplication],
+    access: &keychain::ApplicationAccess,
 ) -> Result<()> {
     if selector.is_empty() {
         return Err(Error::other("name the item, for example with -a and -s"));
@@ -3245,7 +3289,7 @@ fn copy_command(
         signature: item.signature(),
         description: item.text("desc"),
         comment: item.text("icmt"),
-        trusted_applications: trusted.to_vec(),
+        trusted_applications: Vec::new(),
     };
     let summary = serde_json::json!({
         "ok": true,
@@ -3267,7 +3311,13 @@ fn copy_command(
         DestinationPassword::Source(_) => source_password.clone(),
     };
     target.unlock(destination_password.as_bytes())?;
-    target.add_password(record_type, &new, secret.as_slice(), &now_timestamp())?;
+    target.add_password_with_access(
+        record_type,
+        &new,
+        secret.as_slice(),
+        &now_timestamp(),
+        access,
+    )?;
     target.save(destination)?;
 
     report(cli, "copied", || summary);

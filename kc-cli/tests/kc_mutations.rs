@@ -12,6 +12,7 @@
 mod common;
 
 use common::*;
+use keychain::{ApplicationAccess, KeychainFile, Query};
 
 /// A keychain with two generic items and one internet item, all written by kc.
 fn kc_keychain(dir: &TempDir, name: &str) -> String {
@@ -384,6 +385,27 @@ fn an_item_kc_restricted_is_still_readable_by_the_application_it_names() {
         "first"
     );
     let _ = security(&["delete-keychain", &keychain]);
+}
+
+#[test]
+fn trust_prompt_pre_authorizes_no_application() {
+    let dir = TempDir::new("mutate-prompt");
+    let keychain = kc_keychain(&dir, "k.keychain");
+
+    kc_ok(&["trust", "-a", "alice", "--prompt", &keychain], Some("pw"));
+
+    let file = KeychainFile::open(&keychain).expect("open keychain");
+    let item = file
+        .find_one(&Query {
+            account: Some("alice".into()),
+            ..Query::default()
+        })
+        .expect("find item");
+    assert_eq!(
+        file.item_application_access(item.record_type, item.number())
+            .expect("read ACL"),
+        Some(ApplicationAccess::Prompt)
+    );
 }
 
 #[test]

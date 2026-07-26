@@ -132,8 +132,21 @@ pub fn kc(args: &[&str], password: Option<&str>) -> std::process::Output {
     use std::io::Write;
     use std::process::Stdio;
 
-    let mut child = Command::new(kc_binary())
-        .args(args)
+    // Most integration tests exercise the historical item operation in
+    // isolation. Opt those creates out of the new persisted prompt policy;
+    // config tests invoke the binary directly and cover the secure default.
+    let mut command = Command::new(kc_binary());
+    if let Some(create) = args.iter().position(|argument| *argument == "create")
+        && !args.contains(&"--no-access-policy")
+    {
+        command
+            .args(&args[..=create])
+            .arg("--no-access-policy")
+            .args(&args[create + 1..]);
+    } else {
+        command.args(args);
+    }
+    let mut child = command
         .stdin(if password.is_some() {
             Stdio::piped()
         } else {

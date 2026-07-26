@@ -37,7 +37,9 @@ The final command uses Apple's `security` tool to read an item written by
 ## Commands
 
 ```text
-kc create [--idle-timeout SECS] [--no-lock-on-sleep] KEYCHAIN
+kc create [--idle-timeout SECS] [--no-lock-on-sleep]
+          [--access-mode MODE] [--access-default DECISION]
+          [--no-access-policy] KEYCHAIN
 kc info [KEYCHAIN]
 kc show [-d] [--all] FILE
 kc ls FILE
@@ -70,7 +72,8 @@ kc set             SELECTOR [-w [SECRET]] [--set-label NAME] [--set-kind KIND]
 kc rm item         SELECTOR [--all] FILE
 kc rm identity     [-l LABEL] [--hash HEX] FILE
 kc rm cert         [-l LABEL] [--hash HEX] FILE
-kc trust           SELECTOR (-T APP... | --trust-requirement PATH=FILE... | -A) FILE
+kc trust           SELECTOR (-T APP... | --trust-requirement PATH=FILE...
+                   | --prompt | -A) FILE
 kc cp              SELECTOR [--to-password-env NAME] [--to-password-file FILE]
                    [-T APP]... SOURCE DESTINATION
 kc export cert     [-l LABEL] [--der] [-o FILE] KEYCHAIN
@@ -152,11 +155,16 @@ Apple's database format stores ACLs per item, not on the keychain itself.
 every password and private-key item:
 
 ```bash
-kc access set --mode hybrid --default prompt \
-  -T /usr/bin/security machina
+kc access set --mode hybrid --default prompt machina
 kc access apply --to securityd -E KC_PASSWORD machina
 kc access audit --against securityd machina
 ```
+
+`kc create` saves that `hybrid` / `prompt` policy by default. New items
+pre-authorize no native application, the same ACL as `security -T ""`, so
+securityd prompts every caller. Use `--no-access-policy` for the old unmanaged
+behavior, or select another initial policy with `--access-mode` and
+`--access-default`.
 
 Modes separate the two enforcement systems:
 
@@ -164,22 +172,25 @@ Modes separate the two enforcement systems:
 - `native` inherits trusted applications on new items for `securityd`.
 - `hybrid` does both.
 
-A `prompt` decision is refused in scripts unless `--interactive` is present;
-then `kc` asks through `/dev/tty`. Native ACLs authenticate signed applications
-using their designated requirements. A shell invocation cannot securely attest
-which application called it, so `kc` never treats a process path as a signed
-caller identity.
+A direct `kc` `prompt` decision is refused in scripts unless `--interactive`
+is present; then `kc` asks through `/dev/tty`. Native access goes through
+securityd and uses the macOS authorization UI. Native ACLs authenticate signed
+applications using their designated requirements. A shell invocation cannot
+securely attest which application called it, so `kc` never treats a process
+path as a signed caller identity.
 
 `access apply` is explicit because it rewrites existing item ACLs. Apple's
-native ACL can represent “any application” or trusted applications with a
-prompt for other callers; it cannot represent an unconditional deny, so a
-`deny` policy remains an extended-policy feature and is rejected for native
-projection.
+native ACL distinguishes any application, no pre-authorized application
+(prompt every caller), and trusted applications with a prompt for other
+callers. It cannot represent an unconditional deny, so a `deny` policy remains
+an extended-policy feature and is rejected for native projection.
 
 The policy is stored alongside keychain search settings in
 `~/.config/keychain.kdl`. Per-item `kc trust` remains available as an override.
 New items inherit native/hybrid policy unless explicit `-T` or
-`--trust-requirement` options are supplied.
+`--trust-requirement` options are supplied. `kc trust --prompt` removes every
+pre-authorized application from one item; `kc trust -A` allows every
+application without warning.
 
 ### Supplying the keychain password
 

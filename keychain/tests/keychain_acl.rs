@@ -66,6 +66,42 @@ fn apple_trusted_application_acls_round_trip_byte_for_byte() {
 }
 
 #[test]
+fn apple_prompt_every_application_acl_round_trips_byte_for_byte() {
+    if !security_available() {
+        return;
+    }
+    let dir = TempDir::new("acl-prompt");
+    let path = dir.join("k.keychain");
+    create_with_security(&path, "pw");
+    security_ok(&[
+        "add-generic-password",
+        "-a",
+        "u",
+        "-s",
+        "prompt",
+        "-w",
+        "secret",
+        "-T",
+        "",
+        path.to_str().expect("utf-8 path"),
+    ]);
+
+    let bytes = &item_acls(&path)[0];
+    let parsed = AclBlob::parse(bytes).unwrap_or_else(|error| {
+        panic!(
+            "Apple's prompt ACL did not parse: {error}; bytes={}",
+            hex::encode(bytes)
+        )
+    });
+    assert_eq!(parsed.to_bytes(), *bytes);
+    assert_eq!(
+        AclBlob::for_item_prompting("prompt").to_bytes(),
+        *bytes,
+        "kc's prompt ACL must be byte-identical to security -T \"\""
+    );
+}
+
+#[test]
 fn parsed_trusted_applications_carry_the_path_hash_and_requirement() {
     if !security_available() {
         return;

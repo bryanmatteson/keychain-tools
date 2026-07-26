@@ -1,6 +1,7 @@
 //! Persistent CLI defaults and keychain-name resolution.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use keychain::{AccessDefault, AccessMode, Error, KeychainLocator, Result};
 
@@ -60,13 +61,19 @@ impl Config {
     }
 
     pub fn save(&self) -> Result<PathBuf> {
+        static TEMPORARY_COUNTER: AtomicU64 = AtomicU64::new(0);
+
         let path = Self::path()?;
         let parent = path
             .parent()
             .ok_or_else(|| Error::other("configuration path has no parent directory"))?;
         std::fs::create_dir_all(parent)
             .map_err(|error| Error::io(format!("could not create {}", parent.display()), error))?;
-        let temporary = path.with_extension("kdl.tmp");
+        let temporary = path.with_file_name(format!(
+            ".keychain.kdl.{}.{}.tmp",
+            std::process::id(),
+            TEMPORARY_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::write(&temporary, self.render()).map_err(|error| {
             Error::io(format!("could not write {}", temporary.display()), error)
         })?;
@@ -94,8 +101,14 @@ impl Config {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from(&self.default));
         let expanded = expand_tilde(&input)?;
-        if expanded.is_absolute() || input.components().count() > 1 {
-            return Ok(expanded);
+        if expanded.is_absolute() {
+            return Ok(stable_path(expanded));
+        }
+        if input.components().count() > 1 {
+            return std::env::current_dir()
+                .map(|directory| directory.join(expanded))
+                .map(stable_path)
+                .map_err(|error| Error::io("could not resolve the current directory", error));
         }
         Ok(KeychainLocator::new(self.all_search_paths()?)?.resolve(input))
     }
@@ -186,6 +199,21 @@ pub fn access_default_name(default: AccessDefault) -> &'static str {
         AccessDefault::Prompt => "prompt",
         AccessDefault::Deny => "deny",
     }
+}
+
+fn stable_path(path: PathBuf) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(&path) {
+        return canonical;
+    }
+    let Some(parent) = path.parent() else {
+        return path;
+    };
+    let Some(name) = path.file_name() else {
+        return path;
+    };
+    std::fs::canonicalize(parent)
+        .map(|parent| parent.join(name))
+        .unwrap_or(path)
 }
 
 fn expand_tilde(path: &Path) -> Result<PathBuf> {

@@ -432,6 +432,7 @@ fn pkcs12_import_and_export_round_trip_through_openssl() {
     let created = kc_with_env(
         &[
             "create",
+            "--no-access-policy",
             "--password-env",
             "KC_PASSWORD",
             first.to_str().unwrap(),
@@ -500,6 +501,7 @@ fn pkcs12_import_and_export_round_trip_through_openssl() {
     let created = kc_with_env(
         &[
             "create",
+            "--no-access-policy",
             "--password-env",
             "KC_PASSWORD",
             second.to_str().unwrap(),
@@ -565,6 +567,7 @@ fn pkcs12_pem_is_accepted_and_can_be_exported() {
     let created = kc_with_env(
         &[
             "create",
+            "--no-access-policy",
             "--password-env",
             "KC_PASSWORD",
             keychain_path.to_str().unwrap(),

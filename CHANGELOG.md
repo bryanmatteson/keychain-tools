@@ -1,5 +1,31 @@
 # Changelog
 
+## kc-cli 0.5.0
+
+Breaking CLI change:
+
+- `kc create` now saves a `hybrid` / `prompt` access policy by default. Direct
+  secret reads require `--interactive`, and new native item ACLs pre-authorize
+  no application so securityd prompts every caller. Use `--no-access-policy`
+  for the previous unmanaged allow-any behavior.
+
+- Add `--access-mode` and `--access-default` to select a keychain's initial
+  policy.
+- Let prompt policies project to securityd without naming a trusted
+  application, matching the ACL Apple writes for `security -T ""`.
+- Add `kc trust --prompt` for setting that native ACL on one item.
+- Distinguish allow-any, prompt, and trusted-application ACLs during access
+  audits and policy inheritance.
+- Resolve explicit relative keychain paths to stable absolute selectors and use
+  collision-free temporary config files.
+
+## keychain-rs 0.2.5
+
+- Add `ApplicationAccess` and explicit add, edit, and audit entrypoints that
+  distinguish allow-any, prompt-every-caller, and trusted-application ACLs.
+- Parse and reproduce Apple's zero-subject prompt ACL byte-for-byte.
+- Preserve the existing empty-means-allow-any behavior of legacy trust methods.
+
 ## kc-cli 0.4.1
 
 - Accept traditional PKCS#1 RSA private keys in PEM or DER form anywhere an

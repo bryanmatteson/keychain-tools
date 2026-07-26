@@ -3,6 +3,7 @@
 mod common;
 
 use common::*;
+use keychain::{ApplicationAccess, KeychainFile};
 
 #[test]
 fn create_requires_an_output_even_when_a_default_is_configured() {
@@ -13,6 +14,128 @@ fn create_requires_an_output_even_when_a_default_is_configured() {
     );
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("<KEYCHAIN>"));
+}
+
+#[test]
+fn created_keychains_default_to_prompt_for_direct_and_native_access() {
+    let home = TempDir::new("create-access-home");
+    let home_text = home.path().to_str().unwrap();
+    let keychain = home.join("prompt.keychain-db");
+    let keychain_text = keychain.to_str().unwrap();
+
+    for args in [
+        vec!["create", "-p", "pw", keychain_text],
+        vec![
+            "add",
+            "generic",
+            "-p",
+            "pw",
+            "-A",
+            "alice",
+            "-S",
+            "service",
+            "-w",
+            "secret",
+            keychain_text,
+        ],
+    ] {
+        let output = kc_with_env(&args, &[("HOME", home_text)]);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let shown = kc_with_env(&["access", "show", keychain_text], &[("HOME", home_text)]);
+    let shown = String::from_utf8_lossy(&shown.stdout);
+    assert!(shown.contains("hybrid"), "{shown}");
+    assert!(shown.contains("prompt"), "{shown}");
+
+    let audited = kc_with_env(&["access", "audit", keychain_text], &[("HOME", home_text)]);
+    assert!(
+        audited.status.success(),
+        "{}",
+        String::from_utf8_lossy(&audited.stderr)
+    );
+
+    let file = KeychainFile::open(&keychain).expect("open created keychain");
+    let item = file.items().into_iter().next().expect("one item");
+    assert_eq!(
+        file.item_application_access(item.record_type, item.number())
+            .expect("read ACL"),
+        Some(ApplicationAccess::Prompt)
+    );
+
+    let denied = kc_with_env(
+        &[
+            "find",
+            "generic",
+            "-p",
+            "pw",
+            "-A",
+            "alice",
+            "-w",
+            keychain_text,
+        ],
+        &[("HOME", home_text)],
+    );
+    assert!(!denied.status.success());
+    assert!(
+        String::from_utf8_lossy(&denied.stderr).contains("rerun with --interactive"),
+        "{}",
+        String::from_utf8_lossy(&denied.stderr)
+    );
+}
+
+#[test]
+fn an_existing_keychain_can_project_prompt_without_trusted_apps() {
+    let home = TempDir::new("access-prompt-projection-home");
+    let home_text = home.path().to_str().unwrap();
+    let keychain = home.join("existing.keychain-db");
+    let keychain_text = keychain.to_str().unwrap();
+
+    for args in [
+        vec!["create", "--no-access-policy", "-p", "pw", keychain_text],
+        vec![
+            "add",
+            "generic",
+            "-p",
+            "pw",
+            "-A",
+            "alice",
+            "-S",
+            "service",
+            "-w",
+            "secret",
+            keychain_text,
+        ],
+        vec![
+            "access",
+            "set",
+            "--mode",
+            "hybrid",
+            "--default",
+            "prompt",
+            keychain_text,
+        ],
+        vec!["access", "apply", "-p", "pw", keychain_text],
+    ] {
+        let output = kc_with_env(&args, &[("HOME", home_text)]);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let file = KeychainFile::open(&keychain).expect("open keychain");
+    let item = file.items().into_iter().next().expect("one item");
+    assert_eq!(
+        file.item_application_access(item.record_type, item.number())
+            .expect("read ACL"),
+        Some(ApplicationAccess::Prompt)
+    );
 }
 
 #[test]
