@@ -13,7 +13,7 @@ keychain-rs = "0.2"
 ```
 
 ```rust
-use keychain::{create, CreateOptions, KeychainFile, NewItem, Query, RecordType};
+use keychain::{create, CreateOptions, Expression, ItemRef, KeychainFile, NewItem, RecordType};
 
 let mut file = create(b"password", &CreateOptions::default())?;
 file.add_password(
@@ -30,13 +30,23 @@ file.save("demo.keychain")?;
 
 let mut file = KeychainFile::open("demo.keychain")?;
 file.unlock(b"password")?;
-let mut query = Query::generic();
-query.account = Some("alice".into());
-query.service = Some("github.com".into());
-let item = file.find_one(&query)?;
+let query = Expression::parse("class:generic account:alice service:github.com")?;
+let item = file.select(&query)?.remove(0);
 assert_eq!(file.secret(&item)?.as_slice(), b"gh-token-abc");
+
+// References are opaque and bound to this exact database revision.
+let encoded = file.item_ref(&item)?.encode();
+let reference = ItemRef::decode(&encoded)?;
+assert_eq!(file.resolve_ref(&reference)?.number(), item.number());
 # Ok::<(), keychain::Error>(())
 ```
+
+`Expression`, `Predicate`, `Comparison`, and `MatchOptions` are the public query
+model. `Expression::parse` accepts the same typed predicates as `kc get`;
+`Expression::new` supports programmatic construction. `KeychainFile::select`
+queries password, certificate, private-key, public-key, and item-key records.
+`ItemRef` deliberately exposes accessors rather than writable fields so callers
+cannot accidentally manufacture mutation identities.
 
 Identity import/export uses one high-level type for combined PEM and PKCS#12.
 Combined PEM accepts unencrypted PKCS#8 `PRIVATE KEY` and traditional PKCS#1

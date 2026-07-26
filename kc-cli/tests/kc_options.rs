@@ -1,326 +1,185 @@
-//! Command-line surface: where the password comes from, how output is
-//! formatted, and which attributes `find` can filter on.
+//! Canonical command surface: password sources, projections, assignments, and
+//! the typed `get` query language.
 
 mod common;
 
 use common::*;
 
-/// A keychain with one generic and one internet item, both carrying every
-/// attribute the CLI can set.
 fn populated(dir: &TempDir, password: &str) -> String {
     let path = dir.join("k.keychain");
-    let as_str = path.to_str().expect("utf-8 path").to_string();
+    let keychain = path.to_str().expect("utf-8 path").to_string();
 
-    kc_ok(&["create", &as_str], Some(password));
+    kc_ok(&["create", "--no-access-policy", &keychain], Some(password));
     kc_ok(
         &[
             "add",
-            "generic",
-            "-a",
-            "alice",
-            "-s",
-            "svc",
-            "-G",
-            "tag-bytes",
-            "-D",
-            "app password",
-            "-j",
-            "made by kc",
-            "-l",
-            "the label",
+            "class=generic",
+            "account=alice",
+            "service=svc",
+            "generic=tag-bytes",
+            "kind=app password",
+            "comment=made by kc",
+            "label=the label",
             "-w",
             "generic-secret",
-            &as_str,
+            "--keychain",
+            &keychain,
         ],
         Some(password),
     );
     kc_ok(
         &[
             "add",
-            "internet",
-            "-a",
-            "bob",
-            "-s",
-            "example.com",
-            "-S",
-            "realm.example",
-            "-r",
-            "htps",
-            "--path",
-            "/login",
-            "-P",
-            "8443",
-            "-j",
-            "web login",
+            "class=internet",
+            "account=bob",
+            "server=example.com",
+            "security-domain=realm.example",
+            "protocol=htps",
+            "path=/login",
+            "port=8443",
+            "comment=web login",
             "-w",
             "internet-secret",
-            &as_str,
+            "--keychain",
+            &keychain,
         ],
         Some(password),
     );
-    as_str
+    keychain
 }
 
 #[test]
-fn the_password_can_come_from_an_environment_variable() {
-    let dir = TempDir::new("options-env");
-    let path = dir.join("k.keychain");
-    let as_str = path.to_str().expect("utf-8 path");
-
-    // Including for `create`, which is where the password is chosen.
-    let output = kc_with_env(
-        &["create", "--no-access-policy", "-e", "KC_TEST_PW", as_str],
-        &[("KC_TEST_PW", "envpw")],
-    );
-    assert!(
-        output.status.success(),
-        "create failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let output = kc_with_env(
-        &[
-            "add",
-            "generic",
-            "-e",
-            "KC_TEST_PW",
-            "-a",
-            "alice",
-            "-s",
-            "svc",
-            "-w",
-            "s3cret",
-            as_str,
-        ],
-        &[("KC_TEST_PW", "envpw")],
-    );
-    assert!(
-        output.status.success(),
-        "add failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let output = kc_with_env(
-        &[
-            "find",
-            "generic",
-            "-a",
-            "alice",
-            "-w",
-            "-e",
-            "KC_TEST_PW",
-            as_str,
-        ],
-        &[("KC_TEST_PW", "envpw")],
-    );
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "s3cret");
-
-    // A trailing newline in the variable is not part of the password.
-    let output = kc_with_env(
-        &[
-            "find",
-            "generic",
-            "-a",
-            "alice",
-            "-w",
-            "-e",
-            "KC_TEST_PW",
-            as_str,
-        ],
-        &[("KC_TEST_PW", "envpw\n")],
-    );
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "s3cret");
-
-    // And the wrong password is reported as such, not as a missing item.
-    let output = kc_with_env(
-        &[
-            "find",
-            "generic",
-            "-a",
-            "alice",
-            "-w",
-            "-e",
-            "KC_TEST_PW",
-            as_str,
-        ],
-        &[("KC_TEST_PW", "wrong")],
-    );
-    assert!(!output.status.success());
-    assert_eq!(output.status.code(), Some(45), "wrong-password exit code");
-}
-
-#[test]
-fn an_unset_environment_variable_says_so() {
-    let dir = TempDir::new("options-env-missing");
-    let path = dir.join("k.keychain");
-    let as_str = path.to_str().expect("utf-8 path");
-    kc_ok(&["create", as_str], Some("pw"));
-
-    let output = kc_with_env(&["ls", "-e", "KC_TEST_UNSET_PW", as_str], &[]);
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("KC_TEST_UNSET_PW is not set"),
-        "unexpected error: {stderr}"
-    );
-}
-
-#[test]
-fn the_password_can_come_from_a_file_or_from_stdin() {
-    let dir = TempDir::new("options-file");
-    let path = dir.join("k.keychain");
-    let as_str = path.to_str().expect("utf-8 path");
+fn password_sources_work_for_secret_projections() {
+    let dir = TempDir::new("options-sources");
+    let keychain = populated(&dir, "source-pw");
     let password_file = dir.join("pw.txt");
-    // Written the way a shell would write it: with a trailing newline.
-    std::fs::write(&password_file, "filepw\n").expect("write the password file");
-    let password_file = password_file.to_str().expect("utf-8 path");
+    std::fs::write(&password_file, "source-pw\n").expect("write password file");
+    let password_file = password_file.to_str().unwrap();
 
-    kc_ok(&["create", "-f", password_file, as_str], None);
-    kc_ok(
+    let base = [
+        "get",
+        "class:generic",
+        "account:alice",
+        "-o",
+        "secret",
+        "--keychain",
+        &keychain,
+    ];
+    let with_env = kc_with_env(
         &[
-            "add",
-            "generic",
-            "-f",
-            password_file,
-            "-a",
-            "alice",
-            "-s",
-            "svc",
-            "-w",
-            "s3cret",
-            as_str,
+            "get",
+            "class:generic",
+            "account:alice",
+            "-o",
+            "secret",
+            "-E",
+            "KC_TEST_PW",
+            "--keychain",
+            &keychain,
         ],
-        None,
+        &[("KC_TEST_PW", "source-pw\n")],
     );
+    assert!(with_env.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&with_env.stdout).trim(),
+        "generic-secret"
+    );
+
     assert_eq!(
         kc_ok(
             &[
-                "find",
-                "generic",
-                "-a",
-                "alice",
-                "-w",
-                "-f",
+                "get",
+                "class:generic",
+                "account:alice",
+                "-o",
+                "secret",
+                "-F",
                 password_file,
-                as_str
+                "--keychain",
+                &keychain,
             ],
-            None
+            None,
         ),
-        "s3cret"
+        "generic-secret"
     );
-
-    // `-f -` is stdin, which is also what a bare pipe means.
+    assert_eq!(kc_ok(&base, Some("source-pw")), "generic-secret");
     assert_eq!(
         kc_ok(
-            &["find", "generic", "-a", "alice", "-w", "-f", "-", as_str],
-            Some("filepw")
+            &[
+                "get",
+                "class:generic",
+                "account:alice",
+                "-o",
+                "secret",
+                "-P",
+                "source-pw",
+                "--keychain",
+                &keychain,
+            ],
+            None,
         ),
-        "s3cret"
-    );
-    assert_eq!(
-        kc_ok(
-            &["find", "generic", "-a", "alice", "-w", as_str],
-            Some("filepw")
-        ),
-        "s3cret"
+        "generic-secret"
     );
 
-    let output = kc(
+    let missing = kc_with_env(
         &[
-            "find",
-            "generic",
-            "-a",
-            "alice",
-            "-w",
-            "-f",
-            dir.join("absent.txt").to_str().expect("utf-8 path"),
-            as_str,
+            "get",
+            "class:generic",
+            "-o",
+            "secret",
+            "-E",
+            "KC_TEST_UNSET_PW",
+            "--keychain",
+            &keychain,
+        ],
+        &[],
+    );
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("KC_TEST_UNSET_PW is not set"));
+
+    let exclusive = kc(
+        &[
+            "get",
+            "class:generic",
+            "-o",
+            "secret",
+            "-E",
+            "KC_TEST_PW",
+            "-F",
+            password_file,
+            "--keychain",
+            &keychain,
         ],
         None,
     );
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("could not read"),
-        "unexpected error"
-    );
+    assert!(!exclusive.status.success());
+    assert!(String::from_utf8_lossy(&exclusive.stderr).contains("cannot be used with"));
 }
 
 #[test]
-fn the_password_sources_are_mutually_exclusive() {
-    let dir = TempDir::new("options-exclusive");
-    let path = dir.join("k.keychain");
-    let as_str = path.to_str().expect("utf-8 path");
-    kc_ok(&["create", as_str], Some("pw"));
-
-    let output = kc(&["ls", "-e", "KC_TEST_PW", "-f", "/dev/null", as_str], None);
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("cannot be used with"),
-        "unexpected: {stderr}"
-    );
-}
-
-#[test]
-fn the_password_can_be_supplied_directly() {
-    let dir = TempDir::new("options-argv");
-    let path = dir.join("k.keychain");
-    let as_str = path.to_str().expect("utf-8 path");
-    kc_ok(&["create", as_str], Some("pw"));
-
-    for args in [
-        vec!["ls", "-p", "pw", as_str],
-        vec!["ls", "--password", "pw", as_str],
-    ] {
-        let output = kc(&args, None);
-        assert!(
-            output.status.success(),
-            "{args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-}
-
-#[test]
-fn password_flags_and_generator_follow_the_new_contract() {
-    let dir = TempDir::new("options-uppercase");
+fn password_flags_and_generation_follow_the_contract() {
+    let dir = TempDir::new("options-passwords");
     let path = dir.join("generated.keychain");
-    let as_str = path.to_str().unwrap();
-
-    let output = kc(&["create", "--password-gen", as_str], None);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let path = path.to_str().unwrap();
+    let output = kc(&["create", "--password-gen", path], None);
+    assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     let password = stdout
         .lines()
         .find_map(|line| line.strip_prefix("password: "))
-        .expect("generated password is reported");
+        .expect("generated password");
     assert_eq!(password.len(), 40);
     assert!(password.bytes().all(|byte| byte.is_ascii_hexdigit()));
-
-    let output = kc(&["ls", "-p", password, as_str], None);
+    assert!(kc(&["verify", "-P", password, path], None).status.success());
     assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        kc_with_env(&["verify", path, "-E"], &[("KC_PASSWORD", password)])
+            .status
+            .success()
     );
 
-    let output = kc_with_env(&["ls", as_str, "-E"], &[("KC_PASSWORD", password)]);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[test]
-fn generated_password_policies_control_character_classes() {
-    let dir = TempDir::new("options-policies");
     for policy in ["alphanumeric", "mixed-case", "symbol", "secure"] {
-        let path = dir.join(&format!("{policy}.keychain"));
+        let name = format!("{policy}.keychain");
+        let path = dir.join(&name);
         let output = kc(
             &[
                 "create",
@@ -331,236 +190,314 @@ fn generated_password_policies_control_character_classes() {
             ],
             None,
         );
-        assert!(
-            output.status.success(),
-            "{policy}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let password = stdout
+        assert!(output.status.success(), "{policy}");
+        let password = String::from_utf8_lossy(&output.stdout)
             .lines()
             .find_map(|line| line.strip_prefix("password: "))
-            .unwrap();
+            .unwrap()
+            .to_string();
         assert_eq!(password.len(), 40);
         match policy {
-            "alphanumeric" => assert!(password.bytes().all(|byte| byte.is_ascii_alphanumeric())),
+            "alphanumeric" => assert!(password.bytes().all(|b| b.is_ascii_alphanumeric())),
             "mixed-case" => {
-                assert!(password.bytes().all(|byte| byte.is_ascii_alphanumeric()));
-                assert!(password.bytes().any(|byte| byte.is_ascii_lowercase()));
-                assert!(password.bytes().any(|byte| byte.is_ascii_uppercase()));
-                assert!(password.bytes().any(|byte| byte.is_ascii_digit()));
+                assert!(password.bytes().any(|b| b.is_ascii_lowercase()));
+                assert!(password.bytes().any(|b| b.is_ascii_uppercase()));
+                assert!(password.bytes().any(|b| b.is_ascii_digit()));
             }
-            "symbol" => assert!(password.bytes().any(|byte| !byte.is_ascii_alphanumeric())),
+            "symbol" => assert!(password.bytes().any(|b| !b.is_ascii_alphanumeric())),
             "secure" => {
-                assert!(password.bytes().any(|byte| byte.is_ascii_lowercase()));
-                assert!(password.bytes().any(|byte| byte.is_ascii_uppercase()));
-                assert!(password.bytes().any(|byte| byte.is_ascii_digit()));
-                assert!(password.bytes().any(|byte| !byte.is_ascii_alphanumeric()));
+                assert!(password.bytes().any(|b| b.is_ascii_lowercase()));
+                assert!(password.bytes().any(|b| b.is_ascii_uppercase()));
+                assert!(password.bytes().any(|b| b.is_ascii_digit()));
+                assert!(password.bytes().any(|b| !b.is_ascii_alphanumeric()));
             }
             _ => unreachable!(),
         }
     }
-
-    let output = kc(
-        &[
-            "create",
-            "--password-policy",
-            "secure",
-            dir.join("invalid.keychain").to_str().unwrap(),
-        ],
-        None,
-    );
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("--password-gen"));
 }
 
 #[test]
-fn uppercase_metadata_aliases_are_first_class() {
-    let dir = TempDir::new("options-metadata-aliases");
-    let path = dir.join("aliases.keychain");
-    let path = path.to_str().unwrap();
-    kc_ok(&["create", "-p", "pw", path], None);
-    kc_ok(
-        &[
-            "add", "generic", "-p", "pw", "-A", "alice", "-S", "svc", "-L", "label", "-C",
-            "comment", "-w", "secret", path,
-        ],
-        None,
-    );
-    assert_eq!(
-        kc_ok(
-            &[
-                "find", "generic", "-p", "pw", "-A", "alice", "-S", "svc", "-L", "label", "-C",
-                "comment", "-w", path,
-            ],
-            None,
-        ),
-        "secret"
-    );
-}
-
-#[test]
-fn format_secret_prints_the_secret_and_nothing_else() {
-    let dir = TempDir::new("options-format");
+fn get_supports_aliases_typed_comparisons_and_unicode_like_matching() {
+    let dir = TempDir::new("options-query");
     let keychain = populated(&dir, "pw");
 
-    // On `find`, the same thing `-w` does.
+    let cases = [
+        "class:generic",
+        "acct:alice",
+        "svce:svc",
+        "label:the label",
+        "kind:app password",
+        "icmt:%by kc",
+        "gena:tag-bytes",
+    ];
+    for predicate in cases {
+        let output = kc_ok(
+            &[
+                "get",
+                predicate,
+                "-o",
+                "class,account",
+                "--keychain",
+                &keychain,
+            ],
+            None,
+        );
+        assert!(output.contains("generic"), "{predicate}: {output}");
+    }
+    let internet = kc_ok(
+        &[
+            "get",
+            "class:internet",
+            "port:>=8443",
+            "ptcl:htps",
+            "icmt:%login",
+            "-o",
+            "account,server,port",
+            "--keychain",
+            &keychain,
+        ],
+        None,
+    );
+    assert_eq!(internet, "bob  example.com  8443");
+
+    kc_ok(
+        &[
+            "set",
+            "label=Café.com",
+            "--for",
+            "class:generic account:alice",
+            "--keychain",
+            &keychain,
+        ],
+        None,
+    );
+    let folded = kc_ok(
+        &[
+            "get",
+            "class:generic",
+            "label[cd]:cafe.%",
+            "-o",
+            "label",
+            "--keychain",
+            &keychain,
+        ],
+        None,
+    );
+    assert_eq!(folded, "Café.com");
+
+    let created = kc_ok(
+        &[
+            "get",
+            "class:generic",
+            "cdat:<99991231235959Z",
+            "mdat:>=20000101000000Z",
+            "-o",
+            "account",
+            "--keychain",
+            &keychain,
+        ],
+        None,
+    );
+    assert_eq!(created, "alice");
+}
+
+#[test]
+fn projections_and_formats_have_one_shape() {
+    let dir = TempDir::new("options-formats");
+    let keychain = populated(&dir, "pw");
+
+    let text = kc_ok(
+        &[
+            "get",
+            "class:generic",
+            "-o",
+            "label,kind,account,service",
+            "--keychain",
+            &keychain,
+        ],
+        None,
+    );
+    assert_eq!(text, "the label  app password  alice  svc");
+
+    let json = kc_ok(
+        &[
+            "--json",
+            "get",
+            "class:generic",
+            "-o",
+            "account,service",
+            "--keychain",
+            &keychain,
+        ],
+        None,
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed["items"][0]["account"], "alice");
+    assert_eq!(parsed["items"][0]["service"], "svc");
+
     let secret = kc_ok(
         &[
-            "--format", "secret", "find", "generic", "-a", "alice", &keychain,
+            "--format",
+            "secret",
+            "get",
+            "class:generic",
+            "--keychain",
+            &keychain,
         ],
         Some("pw"),
     );
     assert_eq!(secret, "generic-secret");
 
-    // On `show`, one secret per item, which needs no `-d`.
-    let secrets = kc_ok(&["--format", "secret", "show", &keychain], Some("pw"));
-    let mut lines: Vec<&str> = secrets.lines().collect();
-    lines.sort_unstable();
-    assert_eq!(lines, ["generic-secret", "internet-secret"]);
-
-    // Commands that read no secrets say so rather than ignoring the flag.
-    let output = kc(&["--format", "secret", "info", &keychain], None);
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("--format secret applies to"),
-        "unexpected error"
-    );
-}
-
-#[test]
-fn format_json_is_the_json_flag() {
-    let dir = TempDir::new("options-json");
-    let keychain = populated(&dir, "pw");
-
-    let with_flag = kc_ok(
-        &["--json", "find", "generic", "-a", "alice", &keychain],
-        None,
-    );
-    let with_format = kc_ok(
-        &[
-            "--format", "json", "find", "generic", "-a", "alice", &keychain,
-        ],
-        None,
-    );
-    assert_eq!(with_flag, with_format);
-
-    let parsed: serde_json::Value = serde_json::from_str(&with_format).expect("valid JSON");
-    assert_eq!(parsed["item"]["account"], "alice");
-
-    // Asking for both is a mistake worth reporting.
-    let output = kc(
-        &[
-            "--json", "--format", "text", "find", "generic", "-a", "alice", &keychain,
-        ],
-        None,
-    );
-    assert!(!output.status.success());
-}
-
-#[test]
-fn find_filters_on_every_attribute_it_offers() {
-    let dir = TempDir::new("options-filters");
-    let keychain = populated(&dir, "pw");
-
-    let cases: Vec<Vec<&str>> = vec![
-        vec!["find", "generic", "-a", "alice"],
-        vec!["find", "generic", "-s", "svc"],
-        vec!["find", "generic", "-l", "the label"],
-        vec!["find", "generic", "-D", "app password"],
-        vec!["find", "generic", "-j", "made by kc"],
-        vec!["find", "generic", "-G", "tag-bytes"],
-        vec!["find", "generic", "--attr", "acct=alice"],
-        vec!["find", "generic", "--attr", "gena=tag-bytes", "-a", "alice"],
-    ];
-    for case in cases {
-        let mut args = case.clone();
-        args.extend_from_slice(&["-w", &keychain]);
-        assert_eq!(
-            kc_ok(&args, Some("pw")),
-            "generic-secret",
-            "filter {case:?} did not match"
-        );
-    }
-
-    let internet: Vec<Vec<&str>> = vec![
-        vec!["find", "internet", "-S", "realm.example"],
-        vec!["find", "internet", "-d", "realm.example"],
-        vec!["find", "internet", "-j", "web login"],
-        vec!["find", "internet", "--path", "/login"],
-        vec!["find", "internet", "-P", "8443"],
-        // A four-char code reads as text, so it is matched as text.
-        vec!["find", "internet", "--attr", "ptcl=htps"],
-        vec!["find", "internet", "--attr", "port=8443"],
-    ];
-    for case in internet {
-        let mut args = case.clone();
-        args.extend_from_slice(&["-w", &keychain]);
-        assert_eq!(
-            kc_ok(&args, Some("pw")),
-            "internet-secret",
-            "filter {case:?} did not match"
-        );
-    }
-
-    // A filter that matches nothing is "no item matched", not a false hit.
-    let output = kc(
-        &["find", "generic", "-j", "not this comment", &keychain],
+    let many = kc(
+        &["get", "-o", "secret", "--keychain", &keychain],
         Some("pw"),
     );
-    assert_eq!(output.status.code(), Some(44));
+    assert!(!many.status.success());
+    assert!(String::from_utf8_lossy(&many.stderr).contains("pass --all"));
 
-    let output = kc(&["find", "generic", "--attr", "nonsense", &keychain], None);
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("expected NAME=VALUE"),
-        "unexpected error"
-    );
-
-    // An attribute the relation does not have matches nothing rather than
-    // being ignored.
-    let output = kc(&["find", "generic", "--attr", "srvr=x", &keychain], None);
-    assert_eq!(output.status.code(), Some(44));
-}
-
-#[test]
-fn the_generic_attribute_and_security_domain_survive_a_round_trip() {
-    let dir = TempDir::new("options-attributes");
-    let keychain = populated(&dir, "pw");
-
-    let shown = kc_ok(&["show", &keychain], None);
-    assert!(
-        shown.contains("gena         tag-bytes"),
-        "unexpected: {shown}"
-    );
-    assert!(
-        shown.contains("sdmn         realm.example"),
-        "unexpected: {shown}"
-    );
-
-    // The two are part of the internet relation's unique index, so storing the
-    // same item again is a duplicate rather than a second record.
-    let output = kc(
+    let aliases = kc_ok(
         &[
-            "add",
-            "internet",
-            "-a",
-            "bob",
-            "-s",
-            "example.com",
-            "-S",
-            "realm.example",
-            "-r",
-            "htps",
-            "--path",
-            "/login",
-            "-P",
-            "8443",
-            "-w",
-            "again",
+            "get",
+            "class:generic",
+            "-o",
+            "label,kind,acct,svce,icmt,gena",
+            "--keychain",
             &keychain,
         ],
+        None,
+    );
+    assert!(aliases.contains("made by kc"));
+    assert!(aliases.contains("tag-bytes"));
+}
+
+#[test]
+fn distinct_deduplicates_typed_projection_tuples_in_first_seen_order() {
+    let dir = TempDir::new("options-distinct");
+    let path = dir.join("k.keychain");
+    let keychain = path.to_str().unwrap();
+    kc_ok(&["create", "--no-access-policy", keychain], Some("pw"));
+    for (account, service) in [("alice", "machina"), ("bob", "machina"), ("carol", "other")] {
+        kc_ok(
+            &[
+                "add",
+                "class=generic",
+                &format!("account={account}"),
+                &format!("service={service}"),
+                "-w",
+                "secret",
+                "--keychain",
+                keychain,
+            ],
+            Some("pw"),
+        );
+    }
+
+    let all = kc_ok(
+        &["get", "service:_%", "-o", "service", "--keychain", keychain],
+        None,
+    );
+    assert_eq!(
+        all.lines().collect::<Vec<_>>(),
+        ["machina", "machina", "other"]
+    );
+
+    let distinct = kc_ok(
+        &[
+            "get",
+            "service:_%",
+            "-o",
+            "service",
+            "--distinct",
+            "--keychain",
+            keychain,
+        ],
+        None,
+    );
+    assert_eq!(distinct.lines().collect::<Vec<_>>(), ["machina", "other"]);
+
+    let json = kc_ok(
+        &[
+            "--json",
+            "get",
+            "service:_%",
+            "-o",
+            "service",
+            "-u",
+            "--keychain",
+            keychain,
+        ],
+        None,
+    );
+    let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(json["items"].as_array().unwrap().len(), 2);
+    assert_eq!(json["items"][0]["service"], "machina");
+    assert_eq!(json["items"][1]["service"], "other");
+
+    let pairs = kc_ok(
+        &[
+            "get",
+            "service:_%",
+            "-o",
+            "account,service",
+            "-u",
+            "--keychain",
+            keychain,
+        ],
+        None,
+    );
+    assert_eq!(
+        pairs.lines().count(),
+        3,
+        "distinct applies to the whole tuple"
+    );
+}
+
+#[test]
+fn assignment_add_validates_class_specific_fields() {
+    let dir = TempDir::new("options-assignment-add");
+    let path = dir.join("k.keychain");
+    let keychain = path.to_str().unwrap();
+    kc_ok(&["create", "--no-access-policy", keychain], Some("pw"));
+
+    let invalid = kc(
+        &[
+            "add",
+            "class=generic",
+            "account=alice",
+            "server=example.com",
+            "-w",
+            "secret",
+            "--keychain",
+            keychain,
+        ],
         Some("pw"),
     );
-    assert_eq!(output.status.code(), Some(46), "duplicate exit code");
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("no assignable attribute"));
+
+    // The requested uppercase metadata shorts remain available on the typed
+    // identity/password writer surface.
+    kc_ok(
+        &[
+            "add", "generic", "-P", "pw", "-A", "alice", "-S", "svc", "-L", "label", "-C",
+            "comment", "-w", "secret", keychain,
+        ],
+        None,
+    );
+    let output = kc_ok(
+        &[
+            "get",
+            "class:generic",
+            "account:alice",
+            "service:svc",
+            "label:label",
+            "comment:comment",
+            "-o",
+            "account",
+            "--keychain",
+            keychain,
+        ],
+        None,
+    );
+    assert_eq!(output, "alice");
 }

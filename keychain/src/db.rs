@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use crate::crypto::{self, DbBlob, DbKeys, KeyBlob, SSGP_MAGIC, SecretBytes, Ssgp};
 use crate::error::{Error, Result};
 use crate::format::{Keychain, Record, Value, trim_nul};
+use crate::query::{Expression, class_name};
 use crate::schema::{RecordType, Schema};
+use base64::Engine as _;
 
 /// A keychain database, optionally unlocked.
 pub struct KeychainFile {
@@ -143,7 +145,77 @@ impl KeychainFile {
             .collect()
     }
 
-    /// Records of any relation, for `kc show --all`.
+    /// Every user-facing or cryptographic record that `kc get` can query.
+    pub fn queryable_items(&self) -> Vec<Item<'_>> {
+        let mut items = Vec::new();
+        for record_type in [
+            RecordType::GENERIC_PASSWORD,
+            RecordType::INTERNET_PASSWORD,
+            RecordType::APPLESHARE_PASSWORD,
+            RecordType::X509_CERTIFICATE,
+            RecordType::CERT,
+            RecordType::PRIVATE_KEY,
+            RecordType::PUBLIC_KEY,
+            RecordType::SYMMETRIC_KEY,
+        ] {
+            items.extend(self.items_of_type(record_type));
+        }
+        items
+    }
+
+    /// Query every supported record class with one shared typed expression.
+    pub fn select(&self, expression: &Expression) -> Result<Vec<Item<'_>>> {
+        self.queryable_items()
+            .into_iter()
+            .filter_map(|item| match expression.matches(&item) {
+                Ok(true) => Some(Ok(item)),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect()
+    }
+
+    /// Create a mutation-safe reference to an item in this exact database
+    /// revision.
+    pub fn item_ref(&self, item: &Item<'_>) -> Result<ItemRef> {
+        let path = self
+            .path()
+            .ok_or_else(|| Error::other("item references require a keychain opened from a path"))?;
+        Ok(ItemRef {
+            keychain: path.to_path_buf(),
+            commit_version: self.keychain.commit_version.unwrap_or(0),
+            record_type: item.record_type,
+            record_number: item.number(),
+        })
+    }
+
+    /// Validate that a reference names this database revision and still points
+    /// at a record.
+    pub fn resolve_ref(&self, reference: &ItemRef) -> Result<Item<'_>> {
+        let path = self
+            .path()
+            .ok_or_else(|| Error::other("item references require a keychain opened from a path"))?;
+        if path != reference.keychain {
+            return Err(Error::other(format!(
+                "item reference names {}, not {}",
+                reference.keychain.display(),
+                path.display()
+            )));
+        }
+        let version = self.keychain.commit_version.unwrap_or(0);
+        if version != reference.commit_version {
+            return Err(Error::other(format!(
+                "stale item reference: keychain revision is {version}, reference is {}",
+                reference.commit_version
+            )));
+        }
+        self.items_of_type(reference.record_type)
+            .into_iter()
+            .find(|item| item.number() == reference.record_number)
+            .ok_or(Error::NoSuchItem)
+    }
+
+    /// Records of any relation, for callers that need schema-level inspection.
     pub fn records_of_type(&self, record_type: RecordType) -> Vec<&Record> {
         self.keychain
             .table(record_type)
@@ -247,6 +319,95 @@ impl KeychainFile {
     /// Drop an item key that no longer has an item.
     pub(crate) fn forget_item_key(&mut self, label: &[u8; 20]) {
         self.item_keys.remove(label);
+    }
+}
+
+/// Opaque, revision-bound identity for piping `kc get -o @ref` into a mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemRef {
+    keychain: PathBuf,
+    commit_version: u32,
+    record_type: RecordType,
+    record_number: u32,
+}
+
+impl ItemRef {
+    const PREFIX: &'static str = "kc-ref-v1:";
+
+    pub fn encode(&self) -> String {
+        let body = serde_json::json!({
+            "keychain": self.keychain,
+            "commit_version": self.commit_version,
+            "record_type": self.record_type.0,
+            "record_number": self.record_number,
+        })
+        .to_string();
+        format!(
+            "{}{}",
+            Self::PREFIX,
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(body)
+        )
+    }
+
+    pub fn decode(encoded: &str) -> Result<Self> {
+        let body = encoded
+            .trim()
+            .strip_prefix(Self::PREFIX)
+            .ok_or_else(|| Error::other("expected a kc-ref-v1 item reference"))?;
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(body)
+            .map_err(|error| Error::other(format!("invalid item reference: {error}")))?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|error| Error::other(format!("invalid item reference: {error}")))?;
+        let keychain = value["keychain"]
+            .as_str()
+            .map(PathBuf::from)
+            .ok_or_else(|| Error::other("item reference has no keychain path"))?;
+        let commit_version = u32::try_from(
+            value["commit_version"]
+                .as_u64()
+                .ok_or_else(|| Error::other("item reference has no commit version"))?,
+        )
+        .map_err(|_| Error::other("item reference commit version does not fit u32"))?;
+        let record_type = u32::try_from(
+            value["record_type"]
+                .as_u64()
+                .ok_or_else(|| Error::other("item reference has no record type"))?,
+        )
+        .map(RecordType)
+        .map_err(|_| Error::other("item reference record type does not fit u32"))?;
+        let record_number = u32::try_from(
+            value["record_number"]
+                .as_u64()
+                .ok_or_else(|| Error::other("item reference has no record number"))?,
+        )
+        .map_err(|_| Error::other("item reference record number does not fit u32"))?;
+        Ok(Self {
+            keychain,
+            commit_version,
+            record_type,
+            record_number,
+        })
+    }
+
+    pub fn class(&self) -> Option<&'static str> {
+        class_name(self.record_type)
+    }
+
+    pub fn keychain(&self) -> &Path {
+        &self.keychain
+    }
+
+    pub fn commit_version(&self) -> u32 {
+        self.commit_version
+    }
+
+    pub fn record_type(&self) -> RecordType {
+        self.record_type
+    }
+
+    pub fn record_number(&self) -> u32 {
+        self.record_number
     }
 }
 
@@ -379,7 +540,7 @@ impl<'kc> Item<'kc> {
         Some(value.to_display_string())
     }
 
-    /// Every attribute that has a value, for `kc show`.
+    /// Every attribute that has a value, in relation order.
     pub fn attributes(&self) -> Vec<(&'kc str, &'kc Value)> {
         self.schema.named_attributes(self.record_type, self.record)
     }

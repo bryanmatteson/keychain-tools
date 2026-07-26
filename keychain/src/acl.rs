@@ -290,8 +290,9 @@ impl AclBlob {
 
     /// The same three entries with no application pre-authorized.
     ///
-    /// This is byte-for-byte the ACL `security -T ""` writes: securityd asks
-    /// before allowing any application to use the item.
+    /// This has the same entries as the ACL `security -T ""` writes: securityd
+    /// asks before allowing any application to use the item. macOS writes the
+    /// two authorization entries in either order.
     pub fn for_item_prompting(name: &str) -> Self {
         Self::for_item_access(name, &ApplicationAccess::Prompt)
     }

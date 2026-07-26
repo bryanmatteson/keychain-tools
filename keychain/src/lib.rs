@@ -8,6 +8,7 @@
 //! * [`schema`] is the self-describing schema every keychain carries.
 //! * [`crypto`] is the encryption the container specification omits.
 //! * [`db`] ties them together: open, unlock, query, decrypt.
+//! * [`query`] defines typed, composable predicates shared with `kc get`.
 //! * [`mod@write`] creates keychains and adds items.
 //! * [`edit`] updates, deletes, re-seals and re-authorizes what is already there.
 //!
@@ -27,6 +28,7 @@ pub mod index;
 pub mod locator;
 pub mod output;
 pub mod pkcs12;
+pub mod query;
 pub mod records;
 pub mod schema;
 pub mod secret;
@@ -34,7 +36,7 @@ pub mod write;
 
 pub use access::{AccessDecision, AccessDefault, AccessMode, AccessPolicy};
 pub use acl::{AclBlob, ApplicationAccess, TrustedApplication};
-pub use db::{Info, Item, KeychainFile, Query};
+pub use db::{Info, Item, ItemRef, KeychainFile, Query};
 pub use der::decode_private_key;
 pub use edit::{ItemChanges, Settings, StoredIdentity};
 pub use error::{Error, Result};
@@ -44,6 +46,7 @@ pub use pkcs12::{
     Identity as Pkcs12Identity, decode as decode_pkcs12, decode_identity, encode as encode_pkcs12,
     is_combined_pem,
 };
+pub use query::{Comparison, Expression, MatchOptions, Predicate};
 pub use schema::{AttributeFormat, RecordType, Schema};
 pub use write::{CreateOptions, NewIdentity, NewItem, create, now_timestamp};
 

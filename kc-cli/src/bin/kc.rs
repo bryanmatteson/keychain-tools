@@ -10,7 +10,6 @@ use std::process::ExitCode;
 
 use keychain::crypto::KeyBlob;
 use keychain::edit::{ItemChanges, Settings};
-use keychain::format::{self, Record};
 use keychain::write::{CreateOptions, NewIdentity, NewItem, create, now_timestamp};
 use keychain::{Error, Item, KeychainFile, Query, RecordType, Result};
 
@@ -79,12 +78,12 @@ impl Cli {
 /// Where the keychain password comes from.
 ///
 /// Environment variables and files avoid exposing a password in process
-/// arguments. `-p` prompts; a value may also be supplied for shell expressions.
+/// arguments. Omit the options to prompt; `-P` may also take a shell expression.
 #[derive(Args, Clone, Debug, Default)]
 struct PasswordSource {
     /// Use PASSWORD (visible in argv; prefer a shell expression)
     #[arg(
-        short = 'p',
+        short = 'P',
         long = "password",
         value_name = "PASSWORD",
         group = "password-source"
@@ -377,26 +376,38 @@ enum Command {
     /// Show the keychain's format, tables, and key-derivation parameters
     Info { keychain: Option<PathBuf> },
 
-    /// Show items and their attributes
-    Show {
+    /// Query keychain items, certificates, and key records
+    Get {
         #[command(flatten)]
         password: PasswordSource,
 
-        /// Include secrets (requires the password)
-        #[arg(short = 'd', long, action = ArgAction::SetTrue)]
-        secrets: bool,
+        /// ANDed FIELD:VALUE predicates
+        #[arg(value_name = "PREDICATE")]
+        predicates: Vec<String>,
 
-        /// Show every relation, not just password items
+        /// Parse one quoted query expression in addition to positional predicates
+        #[arg(long = "where", value_name = "EXPRESSION")]
+        expression: Option<String>,
+
+        /// Output fields, `*` for detail, or `@ref` for mutation-safe references
+        #[arg(
+            short = 'o',
+            long = "output",
+            value_delimiter = ',',
+            value_name = "FIELD,..."
+        )]
+        output: Vec<String>,
+
+        /// Emit each projected row tuple only once, preserving first-seen order
+        #[arg(short = 'u', long, action = ArgAction::SetTrue)]
+        distinct: bool,
+
+        /// Permit a secret projection to return more than one item
         #[arg(long, action = ArgAction::SetTrue)]
         all: bool,
 
-        keychain: Option<PathBuf>,
-    },
-
-    /// List the wrapped item keys
-    Ls {
-        #[command(flatten)]
-        password: PasswordSource,
+        /// Override the environment or configured default keychain
+        #[arg(long, value_name = "KEYCHAIN")]
         keychain: Option<PathBuf>,
     },
 
@@ -419,39 +430,18 @@ enum Command {
         kind: ImportKind,
     },
 
-    /// Find an item
-    Find {
-        #[command(subcommand)]
-        kind: FindKind,
-    },
-
-    /// Change an item that already exists
+    /// Change every item selected by a query or reference stream
     Set {
-        #[command(flatten)]
-        password: PasswordSource,
-        #[command(flatten)]
-        selector: Selector,
+        /// NAME=VALUE assignments to apply
+        #[arg(required = true, value_name = "ASSIGNMENT")]
+        assignments: Vec<String>,
 
-        /// New secret; read from the terminal or stdin when the flag is given
-        /// without a value
-        #[arg(short = 'w', long, num_args = 0..=1, default_missing_value = "")]
-        secret: Option<String>,
-        /// New label (PrintName)
-        #[arg(short = 'l', long = "set-label", value_name = "LABEL")]
-        new_label: Option<String>,
-        /// New kind
-        #[arg(short = 'D', long = "set-kind", value_name = "KIND")]
-        new_kind: Option<String>,
-        /// New comment
-        #[arg(short = 'j', long = "set-comment", value_name = "COMMENT")]
-        new_comment: Option<String>,
-        /// New generic attribute (generic items)
-        #[arg(short = 'G', long = "set-generic", value_name = "GENERIC")]
-        new_generic: Option<String>,
-        /// Set any other attribute, as NAME=VALUE (repeatable)
-        #[arg(long = "set", value_name = "NAME=VALUE")]
-        set_attributes: Vec<String>,
+        /// Query expression, or `-` to consume `kc get -o @ref` from stdin
+        #[arg(long = "for", required = true, value_name = "EXPRESSION|-")]
+        selection: String,
 
+        /// Override the environment or configured default keychain
+        #[arg(long, value_name = "KEYCHAIN")]
         keychain: Option<PathBuf>,
     },
 
@@ -750,8 +740,8 @@ enum ImportKind {
 
 /// Which item a mutating command acts on.
 ///
-/// The same flags `find` takes, in one place: a mutation names its target the
-/// way a search does, and must match exactly one item unless it says otherwise.
+/// Legacy selector flags shared by commands whose platform-shaped syntax has
+/// not moved to the item query language.
 #[derive(Args, Clone, Debug, Default)]
 struct Selector {
     /// Item class; without it, every password class is searched
@@ -773,13 +763,13 @@ struct Selector {
     #[arg(long)]
     path: Option<String>,
     /// Port (internet items)
-    #[arg(short = 'P', long)]
+    #[arg(long)]
     port: Option<u32>,
     /// Volume (AppleShare items)
     #[arg(short = 'v', long)]
     volume: Option<String>,
     /// Item label (PrintName)
-    #[arg(short = 'L', long)]
+    #[arg(short = 'l', visible_short_alias = 'L', long)]
     label: Option<String>,
     /// Kind
     #[arg(long)]
@@ -1005,7 +995,7 @@ enum AddKind {
         #[arg(long)]
         path: Option<String>,
         /// Port
-        #[arg(short = 'P', long)]
+        #[arg(long)]
         port: Option<u32>,
         /// Protocol, as a four-character code such as http or htps
         #[arg(short = 'r', long)]
@@ -1122,119 +1112,6 @@ enum AddKind {
     },
 }
 
-#[derive(Subcommand)]
-enum FindKind {
-    /// Find a generic password
-    Generic {
-        #[command(flatten)]
-        password: PasswordSource,
-        #[arg(short = 'a', visible_short_alias = 'A', long)]
-        account: Option<String>,
-        #[arg(short = 's', visible_short_alias = 'S', long)]
-        service: Option<String>,
-        /// Generic attribute
-        #[arg(short = 'G', long)]
-        generic: Option<String>,
-        /// Item label (PrintName), as shown in Keychain Access
-        #[arg(short = 'l', visible_short_alias = 'L', long)]
-        label: Option<String>,
-        /// Kind
-        #[arg(short = 'D', long)]
-        kind: Option<String>,
-        /// Comment
-        #[arg(short = 'j', visible_short_alias = 'C', long)]
-        comment: Option<String>,
-        /// Match any other attribute, as NAME=VALUE (repeatable). NAME is what
-        /// `kc show` prints, such as `ptcl` or `atyp`.
-        #[arg(long = "attr", value_name = "NAME=VALUE")]
-        attributes: Vec<String>,
-        /// Print only the secret
-        #[arg(short = 'w', long, action = ArgAction::SetTrue)]
-        secret_only: bool,
-
-        keychain: Option<PathBuf>,
-    },
-
-    /// Find an internet password
-    Internet {
-        #[command(flatten)]
-        password: PasswordSource,
-        #[arg(short = 'a', visible_short_alias = 'A', long)]
-        account: Option<String>,
-        #[arg(short = 's', long)]
-        server: Option<String>,
-        /// Security domain (`-d`, as `security` spells it)
-        #[arg(short = 'S', visible_short_alias = 'd', long)]
-        security_domain: Option<String>,
-        #[arg(long)]
-        path: Option<String>,
-        #[arg(short = 'P', long)]
-        port: Option<u32>,
-        /// Item label (PrintName), as shown in Keychain Access
-        #[arg(short = 'l', visible_short_alias = 'L', long)]
-        label: Option<String>,
-        /// Kind
-        #[arg(short = 'D', long)]
-        kind: Option<String>,
-        /// Comment
-        #[arg(short = 'j', visible_short_alias = 'C', long)]
-        comment: Option<String>,
-        /// Match any other attribute, as NAME=VALUE (repeatable). NAME is what
-        /// `kc show` prints, such as `ptcl` or `atyp`.
-        #[arg(long = "attr", value_name = "NAME=VALUE")]
-        attributes: Vec<String>,
-        /// Print only the secret
-        #[arg(short = 'w', long, action = ArgAction::SetTrue)]
-        secret_only: bool,
-
-        keychain: Option<PathBuf>,
-    },
-
-    /// Find an AppleShare password
-    #[command(name = "appleshare")]
-    AppleShare {
-        #[command(flatten)]
-        password: PasswordSource,
-        #[arg(short = 'a', visible_short_alias = 'A', long)]
-        account: Option<String>,
-        #[arg(short = 'v', long)]
-        volume: Option<String>,
-        #[arg(short = 's', visible_short_alias = 'S', long)]
-        server: Option<String>,
-        #[arg(long)]
-        address: Option<String>,
-        #[arg(long)]
-        signature: Option<String>,
-        /// Item label (PrintName), as shown in Keychain Access
-        #[arg(short = 'l', visible_short_alias = 'L', long)]
-        label: Option<String>,
-        /// Kind
-        #[arg(short = 'D', long)]
-        kind: Option<String>,
-        /// Comment
-        #[arg(short = 'j', visible_short_alias = 'C', long)]
-        comment: Option<String>,
-        /// Match any other attribute, as NAME=VALUE (repeatable). NAME is what
-        /// `kc show` prints, such as `ptcl` or `atyp`.
-        #[arg(long = "attr", value_name = "NAME=VALUE")]
-        attributes: Vec<String>,
-        /// Print only the secret
-        #[arg(short = 'w', long, action = ArgAction::SetTrue)]
-        secret_only: bool,
-
-        keychain: Option<PathBuf>,
-    },
-
-    /// Find an identity (certificate + private key)
-    Identity {
-        /// Match on the identity's label (PrintName)
-        #[arg(short = 'l', visible_short_alias = 'L', long)]
-        label: Option<String>,
-
-        keychain: Option<PathBuf>,
-    },
-}
-
 fn main() -> ExitCode {
     // A CLI should die quietly when its output pipe closes.
     // SAFETY: setting a signal disposition before any threads exist.
@@ -1242,7 +1119,22 @@ fn main() -> ExitCode {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
-    let cli = Cli::parse();
+    let arguments = std::env::args_os().collect::<Vec<_>>();
+    if arguments.len() == 3
+        && arguments[1] == "add"
+        && matches!(arguments[2].to_str(), Some("-h" | "--help"))
+    {
+        print_add_help();
+        return ExitCode::SUCCESS;
+    }
+    let arguments = match normalize_arguments(arguments) {
+        Ok(arguments) => arguments,
+        Err(error) => {
+            let _ = writeln!(std::io::stderr(), "kc: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let cli = Cli::parse_from(arguments);
     match run(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -1260,12 +1152,188 @@ fn main() -> ExitCode {
     }
 }
 
+fn print_add_help() {
+    println!(
+        "Store a password item or identity\n\n\
+         Usage:\n  \
+           kc add class=CLASS NAME=VALUE... [OPTIONS]\n  \
+           kc add identity (--cert FILE --key FILE | --pkcs12 FILE) [OPTIONS] [KEYCHAIN]\n\n\
+         Password item classes:\n  \
+           generic, internet, appleshare\n\n\
+         Options:\n  \
+           -w, --secret <SECRET>              Secret; stdin or prompt when omitted\n  \
+           -P, --password <PASSWORD>          Keychain password\n  \
+           -E, --password-env [ENV_VAR]       Password environment variable [KC_PASSWORD]\n  \
+           -F, --password-file <FILE>         Password file; use - for stdin\n  \
+           -T, --trust-app <PATH>             Trusted application (repeatable)\n  \
+               --trust-requirement <PATH=FILE>\n  \
+               --keychain <KEYCHAIN>          Override the effective default\n  \
+           -h, --help                         Print help\n\n\
+         Examples:\n  \
+           kc add class=generic account=machina service=vpn kind=\"api key\"\n  \
+           kc add class=internet account=alice server=imap.example.com port=443\n  \
+           kc add identity -c certificate.pem -k private-key.pem login"
+    );
+}
+
+/// Lower the assignment form of `kc add` into the strongly typed legacy
+/// subcommands that still implement password-item construction.
+///
+/// This keeps one schema-aware writer while the public CLI gains the uniform
+/// `class=... name=value` grammar.
+fn normalize_arguments(
+    arguments: Vec<std::ffi::OsString>,
+) -> std::result::Result<Vec<std::ffi::OsString>, String> {
+    if arguments.len() < 3
+        || arguments[1] != "add"
+        || !arguments[2..]
+            .iter()
+            .any(|argument| argument.to_string_lossy().starts_with("class="))
+    {
+        return Ok(arguments);
+    }
+
+    let mut assignments = Vec::<(String, String)>::new();
+    let mut passthrough = Vec::<std::ffi::OsString>::new();
+    let mut keychain = None;
+    let mut index = 2;
+    while index < arguments.len() {
+        let argument = arguments[index].to_string_lossy();
+        if argument == "--keychain" {
+            let value = arguments
+                .get(index + 1)
+                .ok_or_else(|| "--keychain requires a value".to_string())?;
+            keychain = Some(value.clone());
+            index += 2;
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--keychain=") {
+            keychain = Some(std::ffi::OsString::from(value));
+            index += 1;
+            continue;
+        }
+        if !argument.starts_with('-') {
+            let (name, value) = argument
+                .split_once('=')
+                .ok_or_else(|| format!("expected NAME=VALUE assignment, got {argument:?}"))?;
+            assignments.push((name.to_string(), value.to_string()));
+            index += 1;
+            continue;
+        }
+
+        passthrough.push(arguments[index].clone());
+        if matches!(argument.as_ref(), "-E" | "-e" | "--password-env") {
+            let optional_value = arguments.get(index + 1).filter(|value| {
+                let value = value.to_string_lossy();
+                !value.starts_with('-') && !value.contains('=')
+            });
+            if let Some(value) = optional_value {
+                passthrough.push(value.clone());
+                index += 2;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        let option_takes_value = matches!(
+            argument.as_ref(),
+            "-P" | "--password"
+                | "-F"
+                | "--password-file"
+                | "-w"
+                | "--secret"
+                | "-T"
+                | "--trust-app"
+                | "--trust-requirement"
+        );
+        if option_takes_value {
+            let value = arguments
+                .get(index + 1)
+                .ok_or_else(|| format!("{argument} requires a value"))?;
+            passthrough.push(value.clone());
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+
+    let class = take_assignment(&mut assignments, &["class"])?
+        .ok_or_else(|| "kc add requires class=generic|internet|appleshare".to_string())?;
+    if !matches!(class.as_str(), "generic" | "internet" | "appleshare") {
+        return Err(format!(
+            "unsupported password-item class {class:?}; expected generic, internet, or appleshare"
+        ));
+    }
+
+    let mut lowered = vec![
+        arguments[0].clone(),
+        std::ffi::OsString::from("add"),
+        std::ffi::OsString::from(&class),
+    ];
+    let mut seen = std::collections::BTreeMap::<String, String>::new();
+    for (name, value) in assignments {
+        let canonical = keychain::query::canonical_field(&name).to_string();
+        if let Some(previous) = seen.insert(canonical.to_ascii_lowercase(), name.clone()) {
+            return Err(format!(
+                "duplicate assignments {previous:?} and {name:?} name the same attribute"
+            ));
+        }
+        let option = match (class.as_str(), canonical.as_str()) {
+            (_, "PrintName") => "--label",
+            (_, "acct") => "--account",
+            (_, "desc") => "--kind",
+            (_, "icmt") => "--comment",
+            ("generic", "svce") => "--service",
+            ("generic", "gena") => "--generic",
+            ("internet", "srvr") | ("appleshare", "srvr") => "--server",
+            ("internet", "sdmn") => "--security-domain",
+            ("internet", "path") => "--path",
+            ("internet", "port") => "--port",
+            ("internet", "ptcl") | ("appleshare", "ptcl") => "--protocol",
+            ("internet", "atyp") => "--auth-type",
+            ("appleshare", "vlme") => "--volume",
+            ("appleshare", "addr") => "--address",
+            ("appleshare", "ssig") => "--signature",
+            (_, "class") => return Err("class may only be assigned once".to_string()),
+            _ => {
+                return Err(format!(
+                    "{class} items have no assignable attribute {name:?}"
+                ));
+            }
+        };
+        lowered.push(std::ffi::OsString::from(option));
+        lowered.push(std::ffi::OsString::from(value));
+    }
+    lowered.extend(passthrough);
+    if let Some(keychain) = keychain {
+        lowered.push(keychain);
+    }
+    Ok(lowered)
+}
+
+fn take_assignment(
+    assignments: &mut Vec<(String, String)>,
+    names: &[&str],
+) -> std::result::Result<Option<String>, String> {
+    let matches = assignments
+        .iter()
+        .enumerate()
+        .filter(|(_, (name, _))| names.iter().any(|wanted| name.eq_ignore_ascii_case(wanted)))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [index] => Ok(Some(assignments.remove(*index).1)),
+        _ => Err(format!("{} may only be assigned once", names[0])),
+    }
+}
+
 fn run(cli: &Cli) -> Result<()> {
     // `--format secret` says "print the secret and nothing else", which only
     // means something for the commands that read secrets.
-    if cli.secrets_only() && !matches!(cli.command, Command::Find { .. } | Command::Show { .. }) {
+    if cli.secrets_only() && !matches!(cli.command, Command::Get { .. }) {
         return Err(Error::other(
-            "--format secret applies to `find` and `show`, which are the commands that read secrets",
+            "--format secret applies to `get`, the command that reads secrets",
         ));
     }
 
@@ -1325,27 +1393,26 @@ fn run(cli: &Cli) -> Result<()> {
 
         Command::Info { keychain } => info(cli, &resolve_keychain(keychain)?),
 
-        Command::Show {
+        Command::Get {
             password,
-            secrets,
+            predicates,
+            expression,
+            output,
+            distinct,
             all,
             keychain,
-        } => {
-            let keychain = resolve_keychain(keychain)?;
-            // Printing secrets and nothing else implies asking for them.
-            let secrets = *secrets || cli.secrets_only();
-            let mut file = KeychainFile::open(&keychain)?;
-            if secrets {
-                authorize_secret_access(cli, &keychain, "read secrets")?;
-                let password = password.resolve(false)?;
-                file.unlock(password.as_bytes())?;
-            }
-            show(cli, &file, secrets, *all)
-        }
-
-        Command::Ls { password, keychain } => {
-            list_keys(cli, &resolve_keychain(keychain)?, password)
-        }
+        } => get_command(
+            cli,
+            password,
+            GetRequest {
+                predicates,
+                whole_expression: expression.as_deref(),
+                output,
+                distinct: *distinct,
+                allow_many_secrets: *all,
+                keychain,
+            },
+        ),
 
         Command::Verify { password, keychain } => {
             verify(cli, &resolve_keychain(keychain)?, password)
@@ -1355,33 +1422,11 @@ fn run(cli: &Cli) -> Result<()> {
 
         Command::Import { kind } => import_command(cli, kind),
 
-        Command::Find { kind } => find_command(cli, kind),
-
         Command::Set {
-            password,
-            selector,
-            secret,
-            new_label,
-            new_kind,
-            new_comment,
-            new_generic,
-            set_attributes,
+            assignments,
+            selection,
             keychain,
-        } => set_command(
-            cli,
-            &resolve_keychain(keychain)?,
-            password,
-            selector,
-            secret.as_deref(),
-            &ItemChanges {
-                label: new_label.clone(),
-                description: new_kind.clone(),
-                comment: new_comment.clone(),
-                generic: new_generic.as_ref().map(|text| text.as_bytes().to_vec()),
-                security_domain: None,
-                attributes: attribute_assignments(set_attributes)?,
-            },
-        ),
+        } => set_query_command(cli, assignments, selection, keychain),
 
         Command::Rm { kind } => rm_command(cli, kind),
 
@@ -1526,6 +1571,15 @@ fn config_command(cli: &Cli, action: &ConfigAction) -> Result<()> {
         ConfigAction::Show => {
             let path = config::Config::path()?;
             let search_paths = config.all_search_paths()?;
+            let environment_default = std::env::var_os("KC_DEFAULT_KEYCHAIN")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from);
+            let effective_default = config.resolve(None)?;
+            let default_source = if environment_default.is_some() {
+                "KC_DEFAULT_KEYCHAIN"
+            } else {
+                "keychains.default"
+            };
             if cli.is_json() {
                 println!(
                     "{}",
@@ -1533,12 +1587,18 @@ fn config_command(cli: &Cli, action: &ConfigAction) -> Result<()> {
                         "ok": true,
                         "path": path,
                         "keychains": { "default": config.default },
+                        "effective": {
+                            "keychain": effective_default,
+                            "source": default_source,
+                        },
                         "search": { "paths": search_paths },
                     })
                 );
             } else {
                 println!("path: {}", path.display());
                 println!("keychains.default: {}", config.default);
+                println!("effective.keychain: {}", effective_default.display());
+                println!("effective.source: {default_source}");
                 for search_path in search_paths {
                     println!("search.paths: {}", search_path.display());
                 }
@@ -2255,100 +2315,303 @@ fn identity_from_file(
     })
 }
 
-fn find_command(cli: &Cli, kind: &FindKind) -> Result<()> {
-    match kind {
-        FindKind::Generic {
-            password,
-            account,
-            service,
-            generic,
-            label,
-            kind,
-            comment,
-            attributes,
-            secret_only,
-            keychain,
-        } => {
-            let keychain = resolve_keychain(keychain)?;
-            let query = Query {
-                record_type: Some(RecordType::GENERIC_PASSWORD),
-                account: account.clone(),
-                service: service.clone(),
-                generic: generic.clone(),
-                label: label.clone(),
-                description: kind.clone(),
-                comment: comment.clone(),
-                attributes: attribute_filters(attributes)?,
-                ..Query::default()
-            };
-            find(cli, &keychain, password, &query, *secret_only)
-        }
+struct GetRequest<'a> {
+    predicates: &'a [String],
+    whole_expression: Option<&'a str>,
+    output: &'a [String],
+    distinct: bool,
+    allow_many_secrets: bool,
+    keychain: &'a Option<PathBuf>,
+}
 
-        FindKind::Internet {
-            password,
-            account,
-            server,
-            security_domain,
-            path,
-            port,
-            label,
-            kind,
-            comment,
-            attributes,
-            secret_only,
-            keychain,
-        } => {
-            let keychain = resolve_keychain(keychain)?;
-            let query = Query {
-                record_type: Some(RecordType::INTERNET_PASSWORD),
-                account: account.clone(),
-                server: server.clone(),
-                security_domain: security_domain.clone(),
-                path: path.clone(),
-                port: *port,
-                label: label.clone(),
-                description: kind.clone(),
-                comment: comment.clone(),
-                attributes: attribute_filters(attributes)?,
-                ..Query::default()
-            };
-            find(cli, &keychain, password, &query, *secret_only)
-        }
+fn get_command(cli: &Cli, password: &PasswordSource, request: GetRequest<'_>) -> Result<()> {
+    let keychain = resolve_keychain(request.keychain)?;
+    let mut expression = keychain::Expression::parse_predicates(request.predicates)?;
+    if let Some(whole_expression) = request.whole_expression {
+        expression
+            .predicates
+            .extend(keychain::Expression::parse(whole_expression)?.predicates);
+    }
 
-        FindKind::AppleShare {
-            password,
-            account,
-            volume,
-            server,
-            address,
-            signature,
-            label,
-            kind,
-            comment,
-            attributes,
-            secret_only,
-            keychain,
-        } => {
-            let keychain = resolve_keychain(keychain)?;
-            let query = Query {
-                record_type: Some(RecordType::APPLESHARE_PASSWORD),
-                account: account.clone(),
-                volume: volume.clone(),
-                server: server.clone(),
-                address: address.clone(),
-                signature: signature.clone(),
-                label: label.clone(),
-                description: kind.clone(),
-                comment: comment.clone(),
-                attributes: attribute_filters(attributes)?,
-                ..Query::default()
-            };
-            find(cli, &keychain, password, &query, *secret_only)
-        }
+    let fields = if cli.secrets_only() {
+        vec!["secret".to_string()]
+    } else if request.output.is_empty() {
+        vec![
+            "class".to_string(),
+            "label".to_string(),
+            "kind".to_string(),
+            "account".to_string(),
+            "service".to_string(),
+            "server".to_string(),
+        ]
+    } else {
+        request.output.to_vec()
+    };
+    validate_projection(&fields)?;
 
-        FindKind::Identity { label, keychain } => {
-            find_identity(cli, &resolve_keychain(keychain)?, label.as_deref())
+    let wants_secret = fields.iter().any(|field| field == "secret");
+    let mut file = KeychainFile::open(&keychain)?;
+    let selected = file.select(&expression)?;
+    if selected.is_empty() && !expression.is_empty() {
+        return Err(Error::NoSuchItem);
+    }
+    if wants_secret && selected.len() > 1 && !request.allow_many_secrets {
+        return Err(Error::other(format!(
+            "{} items match a secret projection; narrow the query or pass --all",
+            selected.len()
+        )));
+    }
+    let selected = selected
+        .iter()
+        .map(|item| (item.record_type, item.number()))
+        .collect::<Vec<_>>();
+
+    if wants_secret {
+        authorize_secret_access(cli, &keychain, "read item secrets")?;
+        let password = password.resolve(false)?;
+        file.unlock(password.as_bytes())?;
+    } else if password.is_explicit()
+        && let Some(password) = password.resolve_optional(false)?
+    {
+        file.unlock(password.as_bytes())?;
+    }
+
+    let items = selected
+        .into_iter()
+        .map(|(record_type, number)| {
+            file.items_of_type(record_type)
+                .into_iter()
+                .find(|item| item.number() == number)
+                .ok_or(Error::NoSuchItem)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    if fields == ["@ref"] {
+        for item in &items {
+            println!("{}", file.item_ref(item)?.encode());
         }
+        return Ok(());
+    }
+
+    if cli.secrets_only() {
+        let mut secrets = items
+            .iter()
+            .map(|item| file.secret(item).map(|secret| secret.as_slice().to_vec()))
+            .collect::<Result<Vec<_>>>()?;
+        if request.distinct {
+            let mut seen = std::collections::BTreeSet::new();
+            secrets.retain(|secret| seen.insert(secret.clone()));
+        }
+        let mut stdout = std::io::stdout();
+        for secret in secrets {
+            stdout
+                .write_all(&secret)
+                .and_then(|()| stdout.write_all(b"\n"))
+                .map_err(|source| Error::io("could not write the secret", source))?;
+        }
+        return Ok(());
+    }
+
+    if fields == ["*"] {
+        return render_full_get(cli, &file, &items);
+    }
+
+    let mut projected = items
+        .iter()
+        .map(|item| {
+            fields
+                .iter()
+                .map(|field| get_property_json(&file, item, field, wants_secret))
+                .collect::<Result<Vec<_>>>()
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if request.distinct {
+        let mut seen = std::collections::BTreeSet::new();
+        projected.retain(|row| {
+            seen.insert(serde_json::to_string(row).expect("JSON values always serialize"))
+        });
+    }
+
+    if cli.is_json() {
+        let rendered = projected
+            .into_iter()
+            .map(|row| {
+                fields
+                    .iter()
+                    .cloned()
+                    .zip(row)
+                    .collect::<serde_json::Map<_, _>>()
+            })
+            .collect::<Vec<_>>();
+        println!(
+            "{}",
+            keychain::output::pretty(&serde_json::json!({
+                "ok": true,
+                "items": rendered,
+            }))
+        );
+        return Ok(());
+    }
+
+    let rows = projected
+        .into_iter()
+        .map(|row| row.into_iter().map(get_property_text).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    print_rows(&rows);
+    Ok(())
+}
+
+fn validate_projection(fields: &[String]) -> Result<()> {
+    if fields.is_empty() {
+        return Err(Error::other("output projection cannot be empty"));
+    }
+    if fields.iter().any(|field| field == "@ref") && fields != ["@ref"] {
+        return Err(Error::other("@ref must be the only output projection"));
+    }
+    if fields.iter().any(|field| field == "*") && fields != ["*"] {
+        return Err(Error::other("* must be the only output projection"));
+    }
+    let mut seen = std::collections::BTreeMap::<String, String>::new();
+    for field in fields {
+        let canonical = keychain::query::canonical_field(field).to_ascii_lowercase();
+        if let Some(previous) = seen.insert(canonical, field.clone()) {
+            return Err(Error::other(format!(
+                "duplicate output fields {previous:?} and {field:?} name the same property"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn render_full_get(cli: &Cli, _file: &KeychainFile, items: &[Item<'_>]) -> Result<()> {
+    if cli.is_json() {
+        let rendered = items
+            .iter()
+            .map(|item| {
+                let mut body = serde_json::Map::new();
+                body.insert(
+                    "class".to_string(),
+                    serde_json::json!(keychain::query::class_name(item.record_type)),
+                );
+                body.insert("record".to_string(), serde_json::json!(item.number()));
+                for (name, value) in item.attributes() {
+                    body.insert(name.to_string(), value_json(name, value));
+                }
+                serde_json::Value::Object(body)
+            })
+            .collect::<Vec<_>>();
+        println!(
+            "{}",
+            keychain::output::pretty(&serde_json::json!({
+                "ok": true,
+                "items": rendered,
+            }))
+        );
+        return Ok(());
+    }
+
+    for (index, item) in items.iter().enumerate() {
+        if index != 0 {
+            println!();
+        }
+        let mut fields = vec![
+            (
+                "class",
+                keychain::query::class_name(item.record_type)
+                    .unwrap_or("unknown")
+                    .to_string(),
+            ),
+            ("record", item.number().to_string()),
+        ];
+        for (name, value) in item.attributes() {
+            fields.push((name, display_attribute(name, value)));
+        }
+        println!("{}", keychain::output::field_list(&fields));
+    }
+    Ok(())
+}
+
+fn get_property_json(
+    file: &KeychainFile,
+    item: &Item<'_>,
+    field: &str,
+    secrets_unlocked: bool,
+) -> Result<serde_json::Value> {
+    let canonical = keychain::query::canonical_field(field);
+    Ok(match canonical {
+        "class" => serde_json::json!(keychain::query::class_name(item.record_type)),
+        "record" => serde_json::json!(item.number()),
+        "has-secret" => serde_json::json!(item.has_secret()),
+        "secret" if secrets_unlocked && item.has_secret() => {
+            let secret = file.secret(item)?;
+            serde_json::json!(String::from_utf8_lossy(secret.as_slice()))
+        }
+        "secret" => serde_json::Value::Null,
+        "key-bits" | "item" | "trusted-apps" | "algorithm" | "wrapped-bytes" => {
+            key_blob_property(item, canonical)
+        }
+        attribute => item
+            .attribute(attribute)
+            .map(|value| value_json(attribute, value))
+            .unwrap_or(serde_json::Value::Null),
+    })
+}
+
+fn get_property_text(value: serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "-".to_string(),
+        serde_json::Value::String(value) => value,
+        serde_json::Value::Array(values) => values
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>()
+            .join(","),
+        value => value.to_string(),
+    }
+}
+
+fn value_json(name: &str, value: &keychain::Value) -> serde_json::Value {
+    match value {
+        keychain::Value::Uint32(value) => serde_json::json!(value),
+        keychain::Value::Sint32(value) => serde_json::json!(value),
+        _ => serde_json::json!(display_attribute(name, value)),
+    }
+}
+
+fn key_blob_property(item: &Item<'_>, field: &str) -> serde_json::Value {
+    let Ok(blob) = KeyBlob::parse(&item.record.key_data) else {
+        return serde_json::Value::Null;
+    };
+    match field {
+        "key-bits" => serde_json::json!(blob.header.logical_key_size_in_bits),
+        "item" => serde_json::json!(blob.public_acl.item_name()),
+        "trusted-apps" => serde_json::json!(blob.public_acl.trusted_paths()),
+        "algorithm" => serde_json::json!(format!("0x{:x}", blob.header.algorithm_id)),
+        "wrapped-bytes" => serde_json::json!(blob.crypto_blob.len()),
+        _ => serde_json::Value::Null,
+    }
+}
+
+fn print_rows(rows: &[Vec<String>]) {
+    let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let widths = (0..columns)
+        .map(|column| {
+            rows.iter()
+                .filter_map(|row| row.get(column))
+                .map(|value| value.chars().count())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect::<Vec<_>>();
+    for row in rows {
+        for (column, value) in row.iter().enumerate() {
+            if column + 1 == row.len() {
+                print!("{value}");
+            } else {
+                print!("{value:<width$}  ", width = widths[column]);
+            }
+        }
+        println!();
     }
 }
 
@@ -2486,322 +2749,6 @@ fn read_private_key(path: &Path) -> Result<Vec<u8>> {
     keychain::der::decode_private_key(&bytes)
 }
 
-fn find(
-    cli: &Cli,
-    keychain: &Path,
-    password: &PasswordSource,
-    query: &Query,
-    secret_only: bool,
-) -> Result<()> {
-    let mut file = KeychainFile::open(keychain)?;
-    // Attribute queries work on a locked keychain; only decryption needs the
-    // password, so it is not demanded unless a secret was asked for.
-    let secret_only = secret_only || cli.secrets_only();
-    let unlocked = match password.resolve_optional(secret_only)? {
-        Some(password) => {
-            authorize_secret_access(cli, keychain, "read a secret")?;
-            file.unlock(password.as_bytes())?;
-            true
-        }
-        None => false,
-    };
-
-    let item = file.find_one(query)?;
-    let secret = if unlocked {
-        Some(file.secret(&item)?)
-    } else {
-        None
-    };
-
-    if secret_only {
-        let secret = secret.ok_or(Error::Locked)?;
-        let mut stdout = std::io::stdout();
-        stdout
-            .write_all(secret.as_slice())
-            .and_then(|()| stdout.write_all(b"\n"))
-            .map_err(|source| Error::io("could not write the secret", source))?;
-        return Ok(());
-    }
-
-    if cli.is_json() {
-        let rendered = render_item(&item, secret.as_ref().map(|secret| secret.as_slice()));
-        println!(
-            "{}",
-            keychain::output::pretty(&serde_json::json!({ "ok": true, "item": rendered }))
-        );
-        return Ok(());
-    }
-
-    let mut fields: Vec<(&str, String)> = vec![(
-        "class",
-        item.record_type.short_name().unwrap_or("?").to_string(),
-    )];
-    for (name, value) in item.attributes() {
-        fields.push((name, display_attribute(name, value)));
-    }
-    if let Some(secret) = &secret {
-        fields.push((
-            "secret",
-            String::from_utf8_lossy(secret.as_slice()).into_owned(),
-        ));
-    }
-    println!("{}", keychain::output::field_list(&fields));
-    Ok(())
-}
-
-/// Identities are a private key paired with a certificate (or public key) that
-/// share the same `Label` attribute.
-fn find_identity(cli: &Cli, keychain: &Path, label: Option<&str>) -> Result<()> {
-    let file = KeychainFile::open(keychain)?;
-    let identities = identities_in(&file, label);
-
-    if identities.is_empty() {
-        return Err(Error::NoSuchItem);
-    }
-
-    if cli.is_json() {
-        println!(
-            "{}",
-            keychain::output::pretty(&serde_json::json!({
-                "ok": true,
-                "identities": identities.iter().map(|identity| serde_json::json!({
-                    "label": identity.label,
-                    "private_key": identity.private_key,
-                    "certificate": identity.certificate,
-                    "public_key": identity.public_key,
-                })).collect::<Vec<_>>(),
-            }))
-        );
-        return Ok(());
-    }
-
-    if identities.len() == 1 {
-        let identity = &identities[0];
-        let mut fields: Vec<(&str, String)> = vec![("class", "identity".to_string())];
-        if let Some(label) = &identity.label {
-            fields.push(("label", label.clone()));
-        }
-        fields.push(("private key", format!("record {}", identity.private_key)));
-        if let Some(certificate) = identity.certificate {
-            fields.push(("certificate", format!("record {certificate}")));
-        }
-        if let Some(public_key) = identity.public_key {
-            fields.push(("public key", format!("record {public_key}")));
-        }
-        println!("{}", keychain::output::field_list(&fields));
-        return Ok(());
-    }
-
-    println!("{:<7}  LABEL", "MATCH");
-    for (index, identity) in identities.iter().enumerate() {
-        println!(
-            "{:<7}  {}",
-            index + 1,
-            identity.label.as_deref().unwrap_or("-")
-        );
-    }
-    Err(Error::other(format!(
-        "{} identities match; narrow the query with -l",
-        identities.len()
-    )))
-}
-
-#[derive(Debug)]
-struct IdentityMatch {
-    label: Option<String>,
-    private_key: u32,
-    certificate: Option<u32>,
-    public_key: Option<u32>,
-}
-
-fn identities_in(file: &KeychainFile, label_filter: Option<&str>) -> Vec<IdentityMatch> {
-    let schema = file.schema();
-    let label_of = |record_type: RecordType, record: &Record| {
-        schema
-            .attribute(record_type, record, "Label")
-            .and_then(|value| value.as_bytes())
-            .map(|bytes| bytes.to_vec())
-    };
-    let print_name_of = |record_type: RecordType, record: &Record| {
-        schema
-            .attribute(record_type, record, "PrintName")
-            .and_then(|value| value.as_bytes())
-            .map(|bytes| String::from_utf8_lossy(format::trim_nul(bytes)).into_owned())
-            .filter(|name| !name.is_empty())
-    };
-
-    // A certificate record has no `Label`: the hash of its public key is what
-    // pairs it with a private key, whose `Label` holds the same hash.
-    let mut cert_by_label = std::collections::BTreeMap::<Vec<u8>, u32>::new();
-    for record_type in [RecordType::X509_CERTIFICATE, RecordType::CERT] {
-        for record in file.records_of_type(record_type) {
-            let key = schema
-                .attribute(record_type, record, "PublicKeyHash")
-                .and_then(|value| value.as_bytes())
-                .map(<[u8]>::to_vec)
-                .or_else(|| label_of(record_type, record));
-            if let Some(key) = key {
-                cert_by_label.insert(key, record.number);
-            }
-        }
-    }
-
-    let mut public_by_label = std::collections::BTreeMap::<Vec<u8>, u32>::new();
-    for record in file.records_of_type(RecordType::PUBLIC_KEY) {
-        if let Some(label) = label_of(RecordType::PUBLIC_KEY, record) {
-            public_by_label.insert(label, record.number);
-        }
-    }
-
-    let mut identities = Vec::new();
-    for record in file.records_of_type(RecordType::PRIVATE_KEY) {
-        let Some(label_bytes) = label_of(RecordType::PRIVATE_KEY, record) else {
-            continue;
-        };
-        let certificate = cert_by_label.get(&label_bytes).copied();
-        let public_key = public_by_label.get(&label_bytes).copied();
-        if certificate.is_none() && public_key.is_none() {
-            continue;
-        }
-        let label = print_name_of(RecordType::PRIVATE_KEY, record);
-        if let Some(wanted) = label_filter
-            && label.as_deref() != Some(wanted)
-        {
-            continue;
-        }
-        identities.push(IdentityMatch {
-            label,
-            private_key: record.number,
-            certificate,
-            public_key,
-        });
-    }
-    identities
-}
-
-fn show(cli: &Cli, file: &KeychainFile, secrets: bool, all: bool) -> Result<()> {
-    let items = file.items();
-
-    if cli.secrets_only() {
-        let mut stdout = std::io::stdout();
-        for item in &items {
-            let secret = file.secret(item)?;
-            stdout
-                .write_all(secret.as_slice())
-                .and_then(|()| stdout.write_all(b"\n"))
-                .map_err(|source| Error::io("could not write the secret", source))?;
-        }
-        return Ok(());
-    }
-
-    if cli.is_json() {
-        let rendered: Vec<_> = items
-            .iter()
-            .map(|item| {
-                let secret = if secrets {
-                    file.secret(item).ok()
-                } else {
-                    None
-                };
-                render_item(item, secret.as_ref().map(|secret| secret.as_slice()))
-            })
-            .collect();
-        let mut body = serde_json::json!({ "ok": true, "items": rendered });
-        if all {
-            body["relations"] = relations_json(file);
-        }
-        println!("{}", keychain::output::pretty(&body));
-        return Ok(());
-    }
-
-    if items.is_empty() {
-        eprintln!("kc: no password items");
-    }
-    for item in &items {
-        println!(
-            "class: {}  label: {}",
-            item.record_type.short_name().unwrap_or("?"),
-            item.label().unwrap_or_default()
-        );
-        for (name, value) in item.attributes() {
-            println!("    {name:<12} {}", display_attribute(name, value));
-        }
-        if secrets {
-            match file.secret(item) {
-                Ok(secret) => {
-                    println!(
-                        "    {:<12} {}",
-                        "secret",
-                        String::from_utf8_lossy(secret.as_slice())
-                    );
-                }
-                Err(error) => println!("    {:<12} <{error}>", "secret"),
-            }
-        }
-    }
-
-    if all {
-        println!("\nrelations:");
-        for table in &file.keychain().tables {
-            println!(
-                "  0x{:08x}  {:>4} records  {}",
-                table.record_type.0,
-                table.record_count(),
-                table.record_type.name()
-            );
-        }
-    }
-    Ok(())
-}
-
-fn list_keys(cli: &Cli, keychain: &Path, password: &PasswordSource) -> Result<()> {
-    let mut file = KeychainFile::open(keychain)?;
-    let password = password.resolve(false)?;
-    file.unlock(password.as_bytes())?;
-
-    let keys: Vec<_> = file
-        .records_of_type(RecordType::SYMMETRIC_KEY)
-        .iter()
-        .filter_map(|record| {
-            let blob = KeyBlob::parse(&record.key_data).ok()?;
-            Some(serde_json::json!({
-                "record": record.number,
-                "label": file
-                    .schema()
-                    .attribute(RecordType::SYMMETRIC_KEY, record, "Label")
-                    .and_then(|value| value.as_bytes())
-                    .map(hex::encode),
-                "item": blob.public_acl.item_name(),
-                "trusted_apps": blob.public_acl.trusted_paths(),
-                "algorithm": format!("0x{:x}", blob.header.algorithm_id),
-                "key_bits": blob.header.logical_key_size_in_bits,
-                "wrapped_bytes": blob.crypto_blob.len(),
-            }))
-        })
-        .collect();
-
-    if cli.is_json() {
-        println!(
-            "{}",
-            keychain::output::pretty(&serde_json::json!({ "ok": true, "keys": keys }))
-        );
-    } else if keys.is_empty() {
-        eprintln!("kc: no item keys");
-    } else {
-        println!("{:<7}  {:<40}  {:<9}  ITEM", "RECORD", "LABEL", "KEY");
-        for key in &keys {
-            println!(
-                "{:<7}  {:<40}  {:<9}  {}",
-                key["record"],
-                key["label"].as_str().unwrap_or("-"),
-                format!("{} bits", key["key_bits"]),
-                key["item"].as_str().unwrap_or("-")
-            );
-        }
-    }
-    Ok(())
-}
-
 /// Check what a reader can check: blob signatures, key unwrapping, that every
 /// item's key is present, and that every index region was understood.
 fn verify(cli: &Cli, keychain: &Path, password: &PasswordSource) -> Result<()> {
@@ -2879,24 +2826,9 @@ fn verify(cli: &Cli, keychain: &Path, password: &PasswordSource) -> Result<()> {
     }
 }
 
-fn relations_json(file: &KeychainFile) -> serde_json::Value {
-    serde_json::json!(
-        file.keychain()
-            .tables
-            .iter()
-            .map(|table| serde_json::json!({
-                "record_type": format!("0x{:08x}", table.record_type.0),
-                "name": table.record_type.name(),
-                "records": table.record_count(),
-            }))
-            .collect::<Vec<_>>()
-    )
-}
-
 /// Render an attribute for display, spelling four-char codes as text.
 ///
-/// The same rendering `--attr NAME=VALUE` matches against, so what `kc show`
-/// prints is what a filter compares.
+/// The same rendering query predicates and projections use for native fields.
 fn display_attribute(name: &str, value: &keychain::Value) -> String {
     if keychain::db::FOUR_CHAR_CODE_ATTRIBUTES.contains(&name)
         && let Some(number) = value.as_u32()
@@ -2915,29 +2847,6 @@ fn pass(value: bool) -> String {
     } else {
         "FAILED".to_string()
     }
-}
-
-fn render_item(item: &Item<'_>, secret: Option<&[u8]>) -> serde_json::Value {
-    let mut body = serde_json::json!({
-        "class": item.record_type.short_name(),
-        "record": item.number(),
-        "label": item.label(),
-        "account": item.account(),
-        "service": item.service(),
-        "server": item.server(),
-        "path": item.path(),
-        "port": item.port(),
-        "volume": item.volume(),
-        "address": item.address(),
-        "signature": item.signature(),
-        "created": item.created(),
-        "modified": item.modified(),
-        "has_secret": item.has_secret(),
-    });
-    if let Some(secret) = secret {
-        body["secret"] = serde_json::json!(String::from_utf8_lossy(secret));
-    }
-    body
 }
 
 fn report(cli: &Cli, text: &str, json: impl FnOnce() -> serde_json::Value) {
@@ -2994,64 +2903,152 @@ fn trusted_applications(
     Ok(applications)
 }
 
-/// `kc set`: change an item that already exists.
-fn set_command(
+fn set_query_command(
     cli: &Cli,
-    keychain: &Path,
-    password: &PasswordSource,
-    selector: &Selector,
-    secret: Option<&str>,
-    changes: &ItemChanges,
+    assignments: &[String],
+    selection: &str,
+    requested_keychain: &Option<PathBuf>,
 ) -> Result<()> {
-    if selector.is_empty() {
-        return Err(Error::other(
-            "name the item to change, for example with -a and -s",
-        ));
-    }
-    if changes.is_empty() && secret.is_none() {
-        return Err(Error::other(
-            "nothing to change; pass -w for the secret or one of the --set-* flags",
-        ));
+    let changes = changes_from_assignments(assignments)?;
+    if changes.is_empty() {
+        return Err(Error::other("nothing to change"));
     }
 
-    let mut file = KeychainFile::open(keychain)?;
-    // Only a new secret needs the keys; renaming an item does not.
-    if secret.is_some() {
-        let password = password.resolve(false)?;
-        file.unlock(password.as_bytes())?;
+    let references = if selection == "-" {
+        let references = std::io::stdin()
+            .lock()
+            .lines()
+            .map(|line| {
+                line.map_err(|source| Error::io("could not read item references", source))
+                    .and_then(|line| keychain::ItemRef::decode(&line))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if references.is_empty() {
+            return Err(Error::other("no item references were read from stdin"));
+        }
+        Some(references)
+    } else {
+        None
+    };
+    let keychain = match (requested_keychain, references.as_ref()) {
+        (Some(requested), _) => resolve_keychain(&Some(requested.clone()))?,
+        (None, Some(references)) => references[0].keychain().to_path_buf(),
+        (None, None) => resolve_keychain(&None)?,
+    };
+    if let Some(references) = &references
+        && let Some(other) = references
+            .iter()
+            .find(|reference| reference.keychain() != keychain)
+    {
+        return Err(Error::other(format!(
+            "item reference names {}, not {}",
+            other.keychain().display(),
+            keychain.display()
+        )));
     }
 
-    let (record_type, number, label) = {
-        let item = file.find_one(&selector.to_query()?)?;
-        (item.record_type, item.number(), item.label())
+    let mut file = KeychainFile::open(&keychain)?;
+    let targets = if let Some(references) = references {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut targets = Vec::with_capacity(references.len());
+        for reference in &references {
+            let item = file.resolve_ref(reference)?;
+            if !is_password_class(item.record_type) {
+                return Err(Error::other(format!(
+                    "{} records cannot be changed with `kc set`",
+                    keychain::query::class_name(item.record_type).unwrap_or("unknown")
+                )));
+            }
+            if !seen.insert((item.record_type.0, item.number())) {
+                return Err(Error::other(
+                    "the reference stream contains a duplicate item",
+                ));
+            }
+            targets.push((item.record_type, item.number(), item.label()));
+        }
+        targets
+    } else {
+        let expression = keychain::Expression::parse(selection)?;
+        if expression.is_empty() {
+            return Err(Error::other("--for must contain at least one predicate"));
+        }
+        let selected = file.select(&expression)?;
+        if selected.is_empty() {
+            return Err(Error::NoSuchItem);
+        }
+        selected
+            .into_iter()
+            .map(|item| {
+                if !is_password_class(item.record_type) {
+                    return Err(Error::other(format!(
+                        "{} records cannot be changed with `kc set`",
+                        keychain::query::class_name(item.record_type).unwrap_or("unknown")
+                    )));
+                }
+                Ok((item.record_type, item.number(), item.label()))
+            })
+            .collect::<Result<Vec<_>>>()?
     };
 
-    // `-w` with no value means "prompt for it", the way `add` does.
-    let secret = match secret {
-        None => None,
-        Some("") => Some(item_secret(&None)?),
-        Some(given) => Some(given.to_string()),
-    };
+    let timestamp = now_timestamp();
+    for (record_type, number, _) in &targets {
+        file.update_item(*record_type, *number, &changes, None, &timestamp)?;
+    }
+    file.save(&keychain)?;
 
-    file.update_item(
-        record_type,
-        number,
-        changes,
-        secret.as_ref().map(|secret| secret.as_bytes()),
-        &now_timestamp(),
-    )?;
-    file.save(keychain)?;
-
-    report(cli, "updated", || {
+    report(cli, &format!("updated {} item(s)", targets.len()), || {
         serde_json::json!({
             "ok": true,
-            "class": record_type.short_name(),
-            "record": number,
-            "label": label,
-            "secret_changed": secret.is_some(),
+            "updated": targets.iter().map(|(record_type, number, label)| serde_json::json!({
+                "class": keychain::query::class_name(*record_type),
+                "record": number,
+                "label": label,
+            })).collect::<Vec<_>>(),
         })
     });
     Ok(())
+}
+
+fn changes_from_assignments(assignments: &[String]) -> Result<ItemChanges> {
+    let mut changes = ItemChanges::default();
+    let mut seen = std::collections::BTreeMap::<String, String>::new();
+    for assignment in assignments {
+        let (name, value) = assignment.split_once('=').ok_or_else(|| {
+            Error::other(format!(
+                "expected NAME=VALUE assignment, got {assignment:?}"
+            ))
+        })?;
+        let canonical = keychain::query::canonical_field(name).to_string();
+        if let Some(previous) = seen.insert(canonical.to_ascii_lowercase(), name.to_string()) {
+            return Err(Error::other(format!(
+                "duplicate assignments {previous:?} and {name:?} name the same attribute"
+            )));
+        }
+        match canonical.as_str() {
+            "class" | "record" | "has-secret" | "secret" | "cdat" | "mdat" => {
+                return Err(Error::other(format!("{name} cannot be changed")));
+            }
+            "PrintName" => changes.label = Some(value.to_string()),
+            "desc" => changes.description = Some(value.to_string()),
+            "icmt" => changes.comment = Some(value.to_string()),
+            "gena" => changes.generic = Some(value.as_bytes().to_vec()),
+            "sdmn" => changes.security_domain = Some(value.to_string()),
+            attribute => changes.attributes.push((
+                attribute.to_string(),
+                keychain::Value::Blob(value.as_bytes().to_vec()),
+            )),
+        }
+    }
+    Ok(changes)
+}
+
+fn is_password_class(record_type: RecordType) -> bool {
+    matches!(
+        record_type,
+        RecordType::GENERIC_PASSWORD
+            | RecordType::INTERNET_PASSWORD
+            | RecordType::APPLESHARE_PASSWORD
+    )
 }
 
 /// `kc rm`: delete items or identities.
@@ -3610,26 +3607,6 @@ fn settings_command(
         ])
     );
     Ok(())
-}
-
-/// Parse `--set NAME=VALUE` assignments into attribute values.
-///
-/// Everything is written as a blob unless it parses as a number and the
-/// relation says the attribute is one, which [`KeychainFile::update_item`]
-/// checks; here the text is taken as given.
-fn attribute_assignments(specs: &[String]) -> Result<Vec<(String, keychain::Value)>> {
-    specs
-        .iter()
-        .map(|spec| {
-            let (name, value) = spec
-                .split_once('=')
-                .ok_or_else(|| Error::other(format!("expected NAME=VALUE, got {spec:?}")))?;
-            Ok((
-                name.to_string(),
-                keychain::Value::Blob(value.as_bytes().to_vec()),
-            ))
-        })
-        .collect()
 }
 
 /// Parse `--attr NAME=VALUE` filters.

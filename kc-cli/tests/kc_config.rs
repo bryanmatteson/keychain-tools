@@ -9,7 +9,7 @@ use keychain::{ApplicationAccess, KeychainFile};
 fn create_requires_an_output_even_when_a_default_is_configured() {
     let home = TempDir::new("create-output-home");
     let output = kc_with_env(
-        &["create", "-p", "test-password"],
+        &["create", "-P", "test-password"],
         &[("HOME", home.path().to_str().unwrap())],
     );
     assert!(!output.status.success());
@@ -24,11 +24,11 @@ fn created_keychains_default_to_prompt_for_direct_and_native_access() {
     let keychain_text = keychain.to_str().unwrap();
 
     for args in [
-        vec!["create", "-p", "pw", keychain_text],
+        vec!["create", "-P", "pw", keychain_text],
         vec![
             "add",
             "generic",
-            "-p",
+            "-P",
             "pw",
             "-A",
             "alice",
@@ -69,13 +69,14 @@ fn created_keychains_default_to_prompt_for_direct_and_native_access() {
 
     let denied = kc_with_env(
         &[
-            "find",
-            "generic",
-            "-p",
+            "get",
+            "class:generic",
+            "account:alice",
+            "-P",
             "pw",
-            "-A",
-            "alice",
-            "-w",
+            "-o",
+            "secret",
+            "--keychain",
             keychain_text,
         ],
         &[("HOME", home_text)],
@@ -96,11 +97,11 @@ fn an_existing_keychain_can_project_prompt_without_trusted_apps() {
     let keychain_text = keychain.to_str().unwrap();
 
     for args in [
-        vec!["create", "--no-access-policy", "-p", "pw", keychain_text],
+        vec!["create", "--no-access-policy", "-P", "pw", keychain_text],
         vec![
             "add",
             "generic",
-            "-p",
+            "-P",
             "pw",
             "-A",
             "alice",
@@ -119,7 +120,7 @@ fn an_existing_keychain_can_project_prompt_without_trusted_apps() {
             "prompt",
             keychain_text,
         ],
-        vec!["access", "apply", "-p", "pw", keychain_text],
+        vec!["access", "apply", "-P", "pw", keychain_text],
     ] {
         let output = kc_with_env(&args, &[("HOME", home_text)]);
         assert!(
@@ -155,7 +156,7 @@ fn bare_names_and_the_saved_default_resolve_under_home() {
     );
 
     let output = kc_with_env(
-        &["create", "-p", "test-password", "machina"],
+        &["create", "-P", "test-password", "machina"],
         &[("HOME", home_text)],
     );
     assert!(
@@ -177,6 +178,61 @@ fn bare_names_and_the_saved_default_resolve_under_home() {
 }
 
 #[test]
+fn environment_default_overrides_saved_default_but_not_an_explicit_keychain() {
+    let home = TempDir::new("config-environment-default");
+    let home_text = home.path().to_str().unwrap();
+    std::fs::create_dir_all(home.join("Library/Keychains")).unwrap();
+    let saved = home.join("Library/Keychains/saved.keychain-db");
+    let environment = home.join("environment.keychain-db");
+    let saved_text = saved.to_str().unwrap();
+    let environment_text = environment.to_str().unwrap();
+
+    for path in [saved_text, environment_text] {
+        let output = kc_with_env(&["create", "-P", "pw", path], &[("HOME", home_text)]);
+        assert!(output.status.success());
+    }
+    assert!(
+        kc_with_env(
+            &["config", "set", "keychains.default", "saved"],
+            &[("HOME", home_text)],
+        )
+        .status
+        .success()
+    );
+
+    let effective = kc_with_env(
+        &["info"],
+        &[
+            ("HOME", home_text),
+            ("KC_DEFAULT_KEYCHAIN", environment_text),
+        ],
+    );
+    assert!(effective.status.success());
+    assert!(String::from_utf8_lossy(&effective.stdout).contains(environment_text));
+
+    let explicit = kc_with_env(
+        &["info", saved_text],
+        &[
+            ("HOME", home_text),
+            ("KC_DEFAULT_KEYCHAIN", environment_text),
+        ],
+    );
+    assert!(explicit.status.success());
+    assert!(String::from_utf8_lossy(&explicit.stdout).contains(saved_text));
+
+    let shown = kc_with_env(
+        &["config", "show"],
+        &[
+            ("HOME", home_text),
+            ("KC_DEFAULT_KEYCHAIN", environment_text),
+        ],
+    );
+    let shown = String::from_utf8_lossy(&shown.stdout);
+    assert!(shown.contains("effective.source: KC_DEFAULT_KEYCHAIN"));
+    assert!(shown.contains(environment_text));
+}
+
+#[test]
 fn additional_search_paths_are_used_for_existing_names() {
     let home = TempDir::new("search-home");
     let extra = home.join("extra");
@@ -188,7 +244,7 @@ fn additional_search_paths_are_used_for_existing_names() {
     let keychain_text = keychain.to_str().unwrap();
 
     let output = kc_with_env(
-        &["create", "-p", "test-password", keychain_text],
+        &["create", "-P", "test-password", keychain_text],
         &[("HOME", home_text)],
     );
     assert!(
@@ -270,11 +326,11 @@ fn keychain_access_policy_can_be_saved_projected_and_audited() {
     let requirement = format!("/usr/bin/security={}", requirement_file.to_str().unwrap());
 
     for args in [
-        vec!["create", "-p", "pw", keychain_text],
+        vec!["create", "-P", "pw", keychain_text],
         vec![
             "add",
             "generic",
-            "-p",
+            "-P",
             "pw",
             "-A",
             "alice",
@@ -308,7 +364,7 @@ fn keychain_access_policy_can_be_saved_projected_and_audited() {
     assert!(!before.status.success(), "an unprojected ACL matched");
 
     let applied = kc_with_env(
-        &["access", "apply", "-p", "pw", keychain_text],
+        &["access", "apply", "-P", "pw", keychain_text],
         &[("HOME", home_text)],
     );
     assert!(
@@ -327,7 +383,7 @@ fn keychain_access_policy_can_be_saved_projected_and_audited() {
         &[
             "add",
             "generic",
-            "-p",
+            "-P",
             "pw",
             "-A",
             "bob",
@@ -353,13 +409,14 @@ fn keychain_access_policy_can_be_saved_projected_and_audited() {
 
     let denied = kc_with_env(
         &[
-            "find",
-            "generic",
-            "-p",
+            "get",
+            "class:generic",
+            "account:alice",
+            "-P",
             "pw",
-            "-A",
-            "alice",
-            "-w",
+            "-o",
+            "secret",
+            "--keychain",
             keychain_text,
         ],
         &[("HOME", home_text)],

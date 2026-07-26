@@ -380,14 +380,30 @@ fn the_generic_attribute_and_security_domain_cross_over() {
     ]);
     assert_eq!(
         kc_ok(
-            &["find", "generic", "-G", "sec-tag", "-w", as_str],
+            &[
+                "get",
+                "class:generic",
+                "generic:sec-tag",
+                "-o",
+                "secret",
+                "--keychain",
+                as_str,
+            ],
             Some("pw")
         ),
         "from-sec"
     );
     assert_eq!(
         kc_ok(
-            &["find", "internet", "-S", "sec-realm", "-w", as_str],
+            &[
+                "get",
+                "class:internet",
+                "security-domain:sec-realm",
+                "-o",
+                "secret",
+                "--keychain",
+                as_str,
+            ],
             Some("pw")
         ),
         "from-sec-2"

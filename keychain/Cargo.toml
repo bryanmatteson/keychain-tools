@@ -11,7 +11,7 @@
     readme                 = "README.md"
     repository.workspace   = true
     rust-version.workspace = true
-    version                = "0.2.5"
+    version                = "0.2.6"
 
 [lib]
     name = "keychain"
@@ -32,6 +32,7 @@
     hex        = { workspace = true }
     p12-keystore = "0.3.1"
     serde_json = { workspace = true }
+    unicode-normalization = "0.1"
 
     # Platform
     libc.workspace      = true

@@ -41,7 +41,7 @@ fn kc_keychain(dir: &TempDir, name: &str) -> String {
             "example.com",
             "-r",
             "htps",
-            "-P",
+            "--port",
             "443",
             "--path",
             "/v1",
@@ -55,7 +55,7 @@ fn kc_keychain(dir: &TempDir, name: &str) -> String {
 }
 
 #[test]
-fn security_reads_an_item_kc_updated() {
+fn security_reads_item_metadata_kc_updated() {
     if !security_available() {
         eprintln!("skipping: /usr/bin/security is unavailable");
         return;
@@ -66,21 +66,19 @@ fn security_reads_an_item_kc_updated() {
     kc_ok(
         &[
             "set",
-            "-a",
-            "alice",
-            "-w",
-            "rotated",
-            "--set-comment",
-            "changed by kc",
+            "comment=changed by kc",
+            "--for",
+            "class:generic account:alice",
+            "--keychain",
             &keychain,
         ],
-        Some("pw"),
+        None,
     );
 
     security_ok(&["unlock-keychain", "-p", "pw", &keychain]);
     assert_eq!(
         security_ok(&["find-generic-password", "-a", "alice", "-w", &keychain]),
-        "rotated"
+        "first"
     );
     let shown = security_ok(&["find-generic-password", "-a", "alice", &keychain]);
     assert!(
@@ -125,7 +123,15 @@ fn security_updates_an_item_that_kc_then_reads() {
     ]);
     assert_eq!(
         kc_ok(
-            &["find", "generic", "-a", "alice", "-w", as_str],
+            &[
+                "get",
+                "class:generic",
+                "account:alice",
+                "-o",
+                "secret",
+                "--keychain",
+                as_str,
+            ],
             Some("pw")
         ),
         "rotated-by-macos"
@@ -133,14 +139,14 @@ fn security_updates_an_item_that_kc_then_reads() {
     assert_eq!(
         kc_ok(
             &[
-                "find",
-                "generic",
-                "-a",
-                "alice",
-                "-j",
-                "changed by security",
-                "-w",
-                as_str
+                "get",
+                "class:generic",
+                "account:alice",
+                "comment:changed by security",
+                "-o",
+                "secret",
+                "--keychain",
+                as_str,
             ],
             Some("pw")
         ),
@@ -194,7 +200,15 @@ fn security_keeps_working_on_a_keychain_kc_deleted_from() {
     // kc still reads everything afterwards, and the file still verifies.
     assert_eq!(
         kc_ok(
-            &["find", "generic", "-a", "dave", "-w", &keychain],
+            &[
+                "get",
+                "class:generic",
+                "account:dave",
+                "-o",
+                "secret",
+                "--keychain",
+                &keychain,
+            ],
             Some("pw")
         ),
         "fourth"
@@ -261,7 +275,15 @@ fn security_unlocks_a_keychain_kc_re_keyed() {
     let output = security(&["unlock-keychain", "-p", "pw", &keychain]);
     assert!(!output.status.success(), "the old password still works");
     let output = kc(
-        &["find", "generic", "-a", "alice", "-w", &keychain],
+        &[
+            "get",
+            "class:generic",
+            "account:alice",
+            "-o",
+            "secret",
+            "--keychain",
+            &keychain,
+        ],
         Some("pw"),
     );
     assert_eq!(output.status.code(), Some(45));
@@ -358,7 +380,18 @@ fn an_item_kc_restricted_is_still_readable_by_the_application_it_names() {
         ],
         Some("pw"),
     );
-    let listed = kc_ok(&["--json", "ls", &keychain], Some("pw"));
+    let listed = kc_ok(
+        &[
+            "--json",
+            "get",
+            "class:item-key",
+            "-o",
+            "trusted-apps",
+            "--keychain",
+            &keychain,
+        ],
+        None,
+    );
     assert!(
         listed.contains("/usr/bin/security"),
         "kc does not see the new ACL: {listed}"
@@ -374,7 +407,18 @@ fn an_item_kc_restricted_is_still_readable_by_the_application_it_names() {
 
     // And back to any application.
     kc_ok(&["trust", "-a", "alice", "-A", &keychain], Some("pw"));
-    let listed = kc_ok(&["--json", "ls", &keychain], Some("pw"));
+    let listed = kc_ok(
+        &[
+            "--json",
+            "get",
+            "class:item-key",
+            "-o",
+            "trusted-apps",
+            "--keychain",
+            &keychain,
+        ],
+        None,
+    );
     assert!(
         !listed.contains("/usr/bin/security"),
         "the restriction survived: {listed}"
@@ -444,7 +488,15 @@ fn an_item_can_be_copied_into_another_keychain() {
     // The source still has it.
     assert_eq!(
         kc_ok(
-            &["find", "internet", "-a", "bob", "-w", &source],
+            &[
+                "get",
+                "class:internet",
+                "account:bob",
+                "-o",
+                "secret",
+                "--keychain",
+                &source,
+            ],
             Some("pw")
         ),
         "third"
@@ -567,7 +619,17 @@ fn deleting_an_identity_removes_both_of_its_records() {
     );
     assert!(output.contains("2 record(s)"), "unexpected: {output}");
 
-    let output = kc(&["find", "identity", as_str], None);
+    let output = kc(
+        &[
+            "get",
+            "class:private-key",
+            "-o",
+            "label",
+            "--keychain",
+            as_str,
+        ],
+        None,
+    );
     assert_eq!(
         output.status.code(),
         Some(44),
@@ -782,12 +844,26 @@ fn a_number_attribute_set_from_the_command_line_is_a_number_to_macos() {
     let keychain = kc_keychain(&dir, "k.keychain");
 
     kc_ok(
-        &["set", "-a", "alice", "--set", "invi=7", &keychain],
-        Some("pw"),
+        &[
+            "set",
+            "invi=7",
+            "--for",
+            "class:generic account:alice",
+            "--keychain",
+            &keychain,
+        ],
+        None,
     );
     kc_ok(
-        &["set", "-a", "alice", "--set", "type=aapl", &keychain],
-        Some("pw"),
+        &[
+            "set",
+            "type=aapl",
+            "--for",
+            "class:generic account:alice",
+            "--keychain",
+            &keychain,
+        ],
+        None,
     );
 
     security_ok(&["unlock-keychain", "-p", "pw", &keychain]);
@@ -806,13 +882,13 @@ fn a_number_attribute_set_from_the_command_line_is_a_number_to_macos() {
     let output = kc(
         &[
             "set",
-            "-a",
-            "alice",
-            "--set",
             "invi=not-a-number",
+            "--for",
+            "class:generic account:alice",
+            "--keychain",
             &keychain,
         ],
-        Some("pw"),
+        None,
     );
     assert!(!output.status.success());
     assert_eq!(std::fs::read(&keychain).expect("read"), before);

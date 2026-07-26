@@ -99,6 +99,11 @@ impl Config {
     pub fn resolve(&self, input: Option<&Path>) -> Result<PathBuf> {
         let input = input
             .map(Path::to_path_buf)
+            .or_else(|| {
+                std::env::var_os("KC_DEFAULT_KEYCHAIN")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+            })
             .unwrap_or_else(|| PathBuf::from(&self.default));
         let expanded = expand_tilde(&input)?;
         if expanded.is_absolute() {

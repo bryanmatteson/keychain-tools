@@ -11,7 +11,7 @@
 mod common;
 
 use common::*;
-use keychain::acl::{AclBlob, Authorization, Subject, TrustedApplication};
+use keychain::acl::{AclBlob, AclEntry, Authorization, Subject, TrustedApplication};
 use keychain::crypto::KeyBlob;
 use keychain::write::{NewItem, now_timestamp};
 use keychain::{KeychainFile, RecordType};
@@ -94,11 +94,24 @@ fn apple_prompt_every_application_acl_round_trips_byte_for_byte() {
         )
     });
     assert_eq!(parsed.to_bytes(), *bytes);
+    let generated = AclBlob::for_item_prompting("prompt");
+    assert_eq!(generated.owner, parsed.owner);
     assert_eq!(
-        AclBlob::for_item_prompting("prompt").to_bytes(),
-        *bytes,
-        "kc's prompt ACL must be byte-identical to security -T \"\""
+        sorted_entries(&generated),
+        sorted_entries(&parsed),
+        "kc's prompt ACL must have the same entries as security -T \"\""
     );
+}
+
+fn sorted_entries(blob: &AclBlob) -> Vec<AclEntry> {
+    let mut entries = blob.entries.clone();
+    entries.sort_by_key(|entry| {
+        entry
+            .authorization
+            .as_ref()
+            .map(|authorization| authorization.tags().to_vec())
+    });
+    entries
 }
 
 #[test]

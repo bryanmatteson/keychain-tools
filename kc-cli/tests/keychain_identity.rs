@@ -270,8 +270,18 @@ fn security_finds_an_identity_kc_wrote() {
         "unexpected: {identities}"
     );
 
-    // And `kc` correlates them the same way.
-    let listed = kc_ok(&["find", "identity", as_str], None);
+    // And `kc` exposes the private-key half through the shared item query.
+    let listed = kc_ok(
+        &[
+            "get",
+            "class:private-key",
+            "-o",
+            "label",
+            "--keychain",
+            as_str,
+        ],
+        None,
+    );
     assert!(listed.contains("kc identity read"), "unexpected: {listed}");
 }
 

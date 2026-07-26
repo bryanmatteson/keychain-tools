@@ -1,598 +1,313 @@
-# kc-cli — `kc` for macOS keychain files
+# kc-cli
 
-The `kc` binary (crate [`kc-cli`](https://crates.io/crates/kc-cli)) creates, reads, and updates macOS `.keychain-db` databases without using the
-Security framework or `securityd`. The file format implementation lives in
-[`keychain-rs`](https://crates.io/crates/keychain-rs); this crate is the CLI.
+`kc` creates, queries, and updates macOS `.keychain-db` files directly. It does
+not call the Security framework, require entitlements, or depend on a running
+`securityd`. The files remain interoperable with Keychain Access and
+`/usr/bin/security`.
 
-It works in environments where the system APIs are unavailable or
-impractical—for example, over SSH, in CI, or with a keychain copied from
-another Mac.
+The Rust library is [`keychain-rs`](../keychain/README.md). This crate provides
+the `kc` command.
 
-The implementation is interoperable with Apple's tooling:
+## Install
 
-- Keychains created by `kc` can be unlocked, searched, read, and updated with
-  `security`.
-- Keychains created by `security` can be read and updated with `kc`, and remain
-  usable with `security` afterward.
-
-```console
-$ kc create ~/demo.keychain
-Keychain password: ····
-Confirm: ····
-created /Users/you/demo.keychain
-
-$ kc add generic -a alice -s github.com -D token ~/demo.keychain
-Keychain password: ····
-Secret: ····
-Confirm: ····
-stored
-
-$ security find-generic-password -a alice -s github.com -w ~/demo.keychain
-gh-token-abc
+```sh
+cargo install kc-cli
 ```
 
-The final command uses Apple's `security` tool to read an item written by
-`kc`.
+## Keychain selection
 
-## Commands
+Every command that accepts `--keychain` resolves keychains in this order:
 
-```text
-kc create [--idle-timeout SECS] [--no-lock-on-sleep]
-          [--access-mode MODE] [--access-default DECISION]
-          [--no-access-policy] KEYCHAIN
-kc info [KEYCHAIN]
-kc show [-d] [--all] FILE
-kc ls FILE
-kc verify FILE
+1. explicit `--keychain KEYCHAIN` or a command's explicit keychain argument;
+2. `KC_DEFAULT_KEYCHAIN`;
+3. `keychains.default` in `~/.config/keychain.kdl`;
+4. `login`.
 
-kc add generic     -a ACCOUNT -s SERVICE [-w SECRET] [-l LABEL] [-D KIND]
-                   [-j COMMENT] [-G GENERIC] [-T APP]... FILE
-kc add internet    -a ACCOUNT -s SERVER [-w SECRET] [-l LABEL] [-D KIND]
-                   [-j COMMENT] [-S DOMAIN] [--path PATH] [-P PORT]
-                   [-r PROTOCOL] [-t AUTHTYPE] [-T APP]... FILE
-kc add appleshare  -a ACCOUNT -v VOLUME [-w SECRET] [-l LABEL] [-D KIND]
-                   [-j COMMENT] [-s SERVER] [--address ADDR]
-                   [--signature SIG] [-T APP]... FILE
-kc add identity    (-c CERT -k KEY | --pkcs12 PFX) [-l LABEL] [-T APP]... FILE
-kc import identity INPUT [-l LABEL] [-T APP]... FILE
+Bare names are searched under `~/Library/Keychains` and then under configured
+search paths. `machina` therefore resolves to
+`~/Library/Keychains/machina.keychain-db`; `system` is the system keychain.
+Paths containing `/` are treated as paths.
 
-kc find generic    [-a ACCOUNT] [-s SERVICE] [-l LABEL] [-D KIND]
-                   [-j COMMENT] [-G GENERIC] [--attr NAME=VALUE]... [-w] FILE
-kc find internet   [-a ACCOUNT] [-s SERVER] [-S DOMAIN] [--path PATH]
-                   [-P PORT] [-l LABEL] [-D KIND] [-j COMMENT]
-                   [--attr NAME=VALUE]... [-w] FILE
-kc find appleshare [-a ACCOUNT] [-v VOLUME] [-s SERVER] [--address ADDR]
-                   [--signature SIG] [-l LABEL] [-D KIND] [-j COMMENT]
-                   [--attr NAME=VALUE]... [-w] FILE
-kc find identity   [-l LABEL] FILE
-
-kc set             SELECTOR [-w [SECRET]] [--set-label NAME] [--set-kind KIND]
-                   [--set-comment TEXT] [--set-generic BYTES]
-                   [--set NAME=VALUE]... FILE
-kc rm item         SELECTOR [--all] FILE
-kc rm identity     [-l LABEL] [--hash HEX] FILE
-kc rm cert         [-l LABEL] [--hash HEX] FILE
-kc trust           SELECTOR (-T APP... | --trust-requirement PATH=FILE...
-                   | --prompt | -A) FILE
-kc cp              SELECTOR [--to-password-env NAME] [--to-password-file FILE]
-                   [-T APP]... SOURCE DESTINATION
-kc export cert     [-l LABEL] [--der] [-o FILE] KEYCHAIN
-kc export key      [-l LABEL] [--der] [-o FILE] KEYCHAIN
-kc export identity [-l LABEL] [-o FILE] [--pkcs12 [--pem]] KEYCHAIN
-kc passwd          [--new-password-env NAME] [--new-password-file FILE] FILE
-kc settings        [-t SECONDS | --no-timeout] [-l | --no-lock-on-sleep] FILE
-
+```sh
+kc config set keychains.default machina
+kc config set search.paths "path1" "path2"
+kc config append search.paths "path3"
+kc config prepend search.paths "preferred"
 kc config show
-kc config set keychains.default KEYCHAIN
-kc config set search.paths PATH [PATH...]
-kc config append search.paths PATH [PATH...]
-kc config prepend search.paths PATH [PATH...]
-kc access show [KEYCHAIN]
-kc access set [--mode extended|native|hybrid] [--default allow|prompt|deny]
-              [-T APP]... [--trust-requirement PATH=FILE]... [KEYCHAIN]
-kc access clear [KEYCHAIN]
-kc access apply [--to securityd] [KEYCHAIN]
-kc access audit [--against securityd] [KEYCHAIN]
-kc completions SHELL
+
+export KC_DEFAULT_KEYCHAIN="$PWD/secrets.keychain-db"
 ```
 
-Every `KEYCHAIN` operand accepts an explicit path or a bare name. Bare names
-are searched under `~/Library/Keychains` as `NAME.keychain-db`,
-`NAME.keychain`, then `NAME`; additional directories can be set with
-`kc config set search.paths "path1" "path2"`. `system` means
-`/Library/Keychains/System.keychain`. When the operand is omitted, `login` is
-used unless changed with `kc config set keychains.default machina`; settings
-are stored in `~/.config/keychain.kdl`.
+`config show` reports both the saved default and the effective default with its
+source.
 
-`SELECTOR` is the same set of flags for every mutating command — the way `find`
-names an item, in one place:
+## Create and add
+
+Creation always requires an output path or name:
+
+```sh
+kc create ./secrets.keychain-db
+kc create --password-gen --password-policy secure ./secrets.keychain-db
+```
+
+Password items use one assignment grammar:
+
+```sh
+kc add \
+  class=generic \
+  label=machina-vpn-operator \
+  account=machina \
+  service=cloudflare \
+  kind="api key" \
+  comment="a vpn operator" \
+  --keychain ./secrets.keychain-db
+
+kc add \
+  class=internet \
+  label="Gmail Account" \
+  account=bryan@example.com \
+  server=imap.gmail.com \
+  port=443 \
+  kind=password
+```
+
+Supported classes are `generic`, `internet`, and `appleshare`. Friendly field
+names and native aliases are interchangeable: `account`/`acct`,
+`service`/`svce`, `comment`/`icmt`, and so on. Class-invalid assignments are
+errors.
+
+When `-w, --secret` is absent, the item secret is read from stdin or prompted
+for on a terminal.
+
+Identities retain a purpose-built form because their inputs are files:
+
+```sh
+kc add identity -c certificate.pem -k private-key.der -l "MDM Push" login
+kc add identity --pkcs12 identity.p12 login
+kc import identity combined.pem login
+```
+
+Certificate and private-key inputs accept PEM or DER by content, regardless of
+file extension. Private keys may be PKCS#8 or RSA PKCS#1. PKCS#12/PFX accepts
+DER or PEM and has independent `--pkcs12-password*` inputs.
+
+## Get
+
+`get` is the only item read command. With no predicates it returns all
+queryable password, certificate, public-key, private-key, and item-key records.
+
+```sh
+kc get
+kc get class:internet label:"Gmail Account" kind:"api key"
+kc get \
+  'class:internet label:"Gmail Account" kind:"api key" icmt:%2026%'
+kc get class:internet label:"Gmail Account" 'icmt:%2026%'
+```
+
+Predicates are ANDed. The canonical grammar is:
 
 ```text
-[-c generic|internet|appleshare] [-a ACCOUNT] [-s SERVICE] [--server HOST]
-[--security-domain REALM] [--path PATH] [-P PORT] [-v VOLUME] [--label NAME]
-[--kind KIND] [--comment TEXT] [--generic BYTES] [--attr NAME=VALUE]...
+FIELD:VALUE
+FIELD:>=VALUE
+FIELD[MODIFIERS]:PATTERN
 ```
 
-For add/find metadata, `-A`, `-S`, `-L`, and `-C` are visible aliases for
-account, service, label, and comment. The lowercase `-a`, `-s`, `-l`, and `-j`
-forms remain compatible. Selector-based commands use `-L` and `-C`; `kc trust`
-keeps `-A` for its established `--any` meaning.
+Comparisons are `=`, `!=`, `<`, `<=`, `>`, and `>=`. A value containing `%` or
+`_` uses SQL-LIKE semantics: `%` matches any sequence and `_` matches one
+character. Backslash escapes a wildcard. `[c]` is case-insensitive, `[d]` is
+diacritic-insensitive, and `[cd]` enables both.
 
-A mutation with no selector is refused rather than applied to whatever happens
-to be first, and one that matches more than one item is refused unless the
-command takes `--all`.
+Examples:
 
-### Changing what is already there
-
-```bash
-kc set -a alice -w                      ~/demo.keychain   # prompt for a new secret
-kc set -a alice --set-comment "rotated" ~/demo.keychain   # attributes only, no password needed
-kc rm item -a alice                     ~/demo.keychain
-kc trust -a alice -T /usr/bin/security  ~/demo.keychain   # restrict, or -A for any application
-kc cp -a alice ~/demo.keychain ~/other.keychain
-kc passwd ~/demo.keychain
-kc settings -t 900 ~/demo.keychain
+```sh
+kc get \
+  'cdat:<20260515074219Z' \
+  'mdat:>=20250515074219Z' \
+  'icmt:%2026%' \
+  'label[cd]:com.%'
 ```
 
-An update keeps the item's record, its record number and its item key, preserves
-`cdat`, and moves `mdat`; only the payload is re-sealed, under a fresh IV.
-Attributes that identify the item — the ones in its relation's unique index,
-such as `acct` and `svce` — are refused: changing one makes it a different item,
-which is a delete and an add.
+Dates accept Keychain UTC timestamps (`YYYYMMDDhhmmssZ`) and RFC 3339 UTC
+timestamps. Numeric and boolean fields are compared as their actual types.
+Unknown modifiers, malformed comparisons, invalid typed values, and unknown
+exact class names are errors.
 
-`kc rm item` deletes the item **and** the key record that protects it, exactly as
-macOS does; `kc rm cert` deletes a certificate and leaves its private key behind,
-the way `security delete-certificate` does, while `kc rm identity` removes both.
+### Projection
 
-`kc passwd` keeps the database's master keys and re-seals them under the new
-password with a fresh salt and IV, so every existing item stays readable. It
-refuses before writing anything if the old password is wrong.
+`-o, --output` selects ordered fields:
 
-### Keychain-wide access policy
+```sh
+kc get \
+  class:generic account:machina service:vpn \
+  -o label,kind,account,service
 
-Apple's database format stores ACLs per item, not on the keychain itself.
-`kc access` provides the higher-level keychain policy and can project it onto
-every password and private-key item:
+kc get class:internet -o '*'
+kc --json get class:internet -o account,server,port
+```
 
-```bash
+`-u, --distinct` emits each projected tuple once while preserving first-seen
+order. Deduplication uses typed projected values before text or JSON rendering:
+
+```sh
+# Unique non-empty service values
+kc get 'service:_%' -o service --distinct
+
+# Unique account/service pairs
+kc get 'service:_%' -o account,service -u
+```
+
+`service:%` also matches an empty service; `service:_%` requires at least one
+character. The query language intentionally uses `%` rather than shell-glob
+`*`.
+
+`*` emits full record detail. `secret` decrypts the selected item. More than
+one secret requires `--all`; non-secret queries intentionally allow multiple
+rows.
+
+```sh
+kc get class:generic account:machina -o secret
+kc --format secret get class:generic account:machina
+kc get class:generic -o secret --all
+```
+
+`@ref` emits opaque, revision-bound item references for mutation pipelines:
+
+```sh
+kc get class:internet 'account[c]:bryan%' -o @ref |
+  kc set label=updated --for -
+```
+
+References carry their keychain and database revision. `set` validates the
+complete stream before changing memory and saves once. A malformed, duplicate,
+wrong-keychain, missing, or stale reference aborts the operation without
+writing. Human-readable and JSON output are never reparsed as selectors.
+
+## Set
+
+`set` applies assignments to every item matched by `--for`:
+
+```sh
+kc set label=updated comment="rotated in 2026" \
+  --for 'class:internet account[c]:bryan%'
+```
+
+The query must be non-empty. `class`, `record`, `secret`, creation time, and
+modification time cannot be changed. Attributes that define a relation's unique
+identity are rejected by the library; replacing those means deleting and
+adding an item.
+
+Updates are collected first, applied in memory, and saved once. A failure
+before the save leaves the file unchanged.
+
+## Password input
+
+All keychain-password consumers use the same sources:
+
+```text
+-E, --password-env [ENV_VAR]       default ENV_VAR: KC_PASSWORD
+-F, --password-file FILE           use - for stdin
+    --password-gen[=TEMPLATE]       creation/change only; default: sha1
+-P, --password PASSWORD
+    --password-policy POLICY        alphanumeric|mixed-case|symbol|secure
+```
+
+When no source is set, `kc` reads the password from stdin or prompts on a
+terminal. Environment variables and files avoid exposing secrets in process
+arguments. If `-P` is useful for shell composition, prefer a shell expression:
+
+```sh
+kc get class:generic account:alice -o secret \
+  -P "$(secret-tool lookup kc login)"
+```
+
+## Access policy and native ACLs
+
+New keychains default to a saved `hybrid` policy whose direct and native
+decision is `prompt`. Direct secret access therefore requires `--interactive`;
+native ACLs pre-authorize no caller, allowing `securityd` to show its normal
+authorization UI.
+
+```sh
+kc access show machina
 kc access set --mode hybrid --default prompt machina
-kc access apply --to securityd -E KC_PASSWORD machina
+kc access apply --to securityd machina
 kc access audit --against securityd machina
 ```
 
-`kc create` saves that `hybrid` / `prompt` policy by default. New items
-pre-authorize no native application, the same ACL as `security -T ""`, so
-securityd prompts every caller. Use `--no-access-policy` for the old unmanaged
-behavior, or select another initial policy with `--access-mode` and
-`--access-default`.
+`extended` enforces the `kc` policy only, `native` delegates to item ACLs, and
+`hybrid` does both. Keychain-wide policy is projected onto items when they are
+written and can be reapplied to existing items. Native Keychain ACLs are still
+item-level data; the saved keychain policy is the template and enforcement
+model for all items.
 
-Modes separate the two enforcement systems:
+For individual legacy operations, `kc trust` supports:
 
-- `extended` makes direct `kc` secret reads honor `allow`, `prompt`, or `deny`.
-- `native` inherits trusted applications on new items for `securityd`.
-- `hybrid` does both.
-
-A direct `kc` `prompt` decision is refused in scripts unless `--interactive`
-is present; then `kc` asks through `/dev/tty`. Native access goes through
-securityd and uses the macOS authorization UI. Native ACLs authenticate signed
-applications using their designated requirements. A shell invocation cannot
-securely attest which application called it, so `kc` never treats a process
-path as a signed caller identity.
-
-`access apply` is explicit because it rewrites existing item ACLs. Apple's
-native ACL distinguishes any application, no pre-authorized application
-(prompt every caller), and trusted applications with a prompt for other
-callers. It cannot represent an unconditional deny, so a `deny` policy remains
-an extended-policy feature and is rejected for native projection.
-
-The policy is stored alongside keychain search settings in
-`~/.config/keychain.kdl`. Per-item `kc trust` remains available as an override.
-New items inherit native/hybrid policy unless explicit `-T` or
-`--trust-requirement` options are supplied. `kc trust --prompt` removes every
-pre-authorized application from one item; `kc trust -A` allows every
-application without warning.
-
-### Supplying the keychain password
-
-Commands that decrypt or modify data accept mutually exclusive password
-sources:
-
-```bash
-kc find generic -a alice -w -p "$(secret-tool lookup kc login)" login
-kc find generic -a alice -w -E KC_PASSWORD ~/demo.keychain
-kc find generic -a alice -w login -E
-kc find generic -a alice -w -F ~/.kc-pw    ~/demo.keychain
-kc create --password-gen machina
+```sh
+kc trust -a alice -T /Applications/MyApp.app login
+kc trust -a alice --trust-requirement \
+  /Applications/MyApp.app=requirement.bin login
+kc trust -a alice --prompt login
+kc trust -a alice -A login
 ```
 
-- `-p PASSWORD` supplies a value directly. It is visible in process arguments;
-  prefer a shell expression such as `-p "$(command)"`, or use `-E`/`-F`.
-- `-E [ENV_VAR]` reads an environment variable; bare `-E` uses `KC_PASSWORD`.
-- `-F FILE` reads the first line of a file; `-F -` reads standard input.
-- `--password-gen[=TEMPLATE]` generates a new password; without a template it
-  uses `sha1`, producing 20 random bytes as 40 lowercase hexadecimal characters.
-- `--password-policy alphanumeric|mixed-case|symbol|secure` changes the
-  generated alphabet. `mixed-case` guarantees lowercase, uppercase, and a
-  digit; `secure` additionally guarantees punctuation. It requires
-  `--password-gen`.
+`--trust-requirement PATH=FILE` stores the compiled code requirement while the
+legacy cdhash remains optional. This preserves Security.framework
+interoperability while allowing stronger application identity.
 
-Without an option, `kc` reads from standard input when it is connected to a
-pipe and prompts without echoing when connected to a terminal.
+## Identity import and export
 
-### Querying attributes
-
-`--attr NAME=VALUE` filters on any attribute printed by `kc show`. Attribute
-names and rendered values use the same representation in both commands, so a
-filter such as `--attr ptcl=htps` works even though the protocol is stored as
-an integer. Repeat the option to require multiple attributes.
-
-### Adding identities
-
-`kc add identity` accepts either a certificate plus an unencrypted PKCS#8 or
-traditional PKCS#1 RSA private key in PEM or DER form, or a PKCS#12/PFX
-container holding one identity:
-
-```bash
-kc add identity -c cert.pem -k key.pem ~/demo.keychain
-kc add identity --pkcs12 identity.p12 ~/demo.keychain
-kc add identity --pkcs12 identity.p12 \
-  --pkcs12-password-env P12_PASSWORD ~/demo.keychain
+```sh
+kc export cert -l "MDM Push" -o certificate.pem login
+kc export key -l "MDM Push" -o private-key.pem login
+kc export identity -l "MDM Push" -o identity.pem login
+kc export identity -l "MDM Push" --pkcs12 -o identity.p12 login
+kc export identity -l "MDM Push" --pkcs12 --pem -o identity.p12.pem login
 ```
 
-The PKCS#12 password can come from `--pkcs12-password[=PASSWORD]`,
-`--pkcs12-password-env NAME`, or `--pkcs12-password-file FILE`; otherwise it is
-read from a pipe or prompted for.
-Containers with multiple identities are refused rather than choosing one
-implicitly. The bundle's friendly name becomes the identity label unless
-`--label` overrides it.
+An explicit output path is recommended for exported secret material. PKCS#12
+exports are encrypted with the selected PKCS#12 password.
 
-`kc import identity` auto-detects a combined certificate/private-key PEM
-document or a PKCS#12 container. PKCS#12 input may be its conventional binary
-DER representation or PEM with a `PKCS12` label. `kc export identity` writes
-combined PEM by default; `--pkcs12` writes encrypted DER PKCS#12, and
-`--pkcs12 --pem` writes the same container in PEM form.
-
-PKCS#12 support is provided by `keychain-rs`; publish that crate before
-packaging `kc-cli`, then run `mise run kc-cli:package`.
-
-### Output formats
-
-`--format` controls command output:
-
-- `text` prints aligned field lists and is the default.
-- `json` prints a stable JSON envelope.
-- `secret` prints only the decrypted secret.
-
-`--json` is shorthand for `--format json`. On `find`, `-w` is shorthand for
-secret-only output. On `show`, `--format secret` prints one secret per item and
-implies `-d`.
-
-```bash
-kc find generic -a alice --format secret ~/demo.keychain | pbcopy
-kc --format json find internet -s example.com ~/demo.keychain |
-  jq .item.port
-```
-
-Exit codes are stable:
-
-| Code | Meaning |
-| ---: | --- |
-| `0` | Success |
-| `44` | No item matched |
-| `45` | Wrong password or locked keychain |
-| `46` | Duplicate item |
-| `1` | Other error |
-
-Item attributes are not encrypted and can be read without the password.
-Decrypting secrets requires it:
-
-```bash
-kc show ~/demo.keychain
-kc show -d ~/demo.keychain
-```
-
-### Verification
-
-`kc verify` checks the parts of the database that can be validated by a reader:
-
-- the database blob signature;
-- every key blob signature;
-- the presence and successful unwrapping of each item's key; and
-- complete understanding of every index region.
-
-```console
-$ kc verify ~/demo.keychain
-database signature   ok
-key signatures       2/2 verified
-items readable       2/2
-index regions        11/11 understood
-```
-
-## File format
-
-The container format is documented in
-[dtformats: MacOS keychain database file format](https://github.com/libyal/dtformats/blob/main/documentation/MacOS%20keychain%20database%20file%20format.asciidoc).
-Multibyte values are big-endian.
+## Other commands
 
 ```text
-file header (20 bytes: "kych", version, tables offset)
-tables array: size, count, count × offset
-  table: header (28 bytes), record-slot array, records, index region
-    record: header (24 bytes), attribute offsets, key data, attributes
-commit counter (u32 following the tables array)
+kc info [KEYCHAIN]
+kc verify [KEYCHAIN]
+kc rm item SELECTOR [--all] [KEYCHAIN]
+kc rm identity [-l LABEL | --hash HEX] [KEYCHAIN]
+kc cp SELECTOR SOURCE DESTINATION
+kc passwd [KEYCHAIN]
+kc settings [OPTIONS] [KEYCHAIN]
+kc completions SHELL
 ```
 
-A keychain is a CSSM database with a self-describing schema. Four schema tables
-define the attributes of the remaining relations. `kc` reads that schema rather
-than hard-coding password and key-record layouts.
+`show`, `find`, and `ls` were removed in 0.6.0. Their behavior is represented
+by `get`, projections, and an empty query.
 
-Several format details are particularly important:
+## Output and exit status
 
-| Detail | Representation |
-| --- | --- |
-| Attribute order | The attribute-offset array follows schema-table order, not attribute-ID order. |
-| Attribute names | Password relations generally use four-character codes such as `acct`, `svce`, and `srvr`; `PrintName` and `Alias` use string names. |
-| Offsets | Attribute offsets are relative to the record and have their low bit set. Index offsets are relative to the table. |
+Text is the default. `--json` is shorthand for `--format json`;
+`--format secret` emits only secret bytes suitable for a pipeline.
 
-Integers are stored as four raw bytes. Dates use the fixed 16-byte form
-`YYYYMMDDhhmmssZ`, followed by a NUL and no length prefix. Other values use a
-four-byte length followed by data padded to a four-byte boundary.
-
-### Record slots and free lists
-
-A table's slot array is indexed by record number — a record's number *is* the
-slot it occupies:
-
-| Slot value | Meaning |
-| --- | --- |
-| Even and nonzero | Record offset relative to the table |
-| Odd | Free-list link: `(28 + 4 × slot) | 1`, pointing at the next free slot |
-| `0` | Free, and the end of the free-list chain |
-
-The table header's sixth word is the head of that chain. It points at the
-**highest** free slot, which links down to the next, and so on to a slot holding
-`0`; a table with no free slots carries `0`. A freshly created table carries
-`0x1d`, which is simply the link to its single free slot 0. The chain is a
-function of which slots are free, not of the order they were freed in: two
-keychains that reach the same state by opposite deletion orders are byte-identical.
-
-Deleting a record frees its slot and leaves the array length alone, unless the
-freed slot is the last one — then that entry is removed and the count drops by
-one, never cascading past other trailing free slots and never below a single
-slot. Inserting takes the head of the chain and reuses that slot's record
-number, and the new record's bytes go at the *end* of the records region even
-when the slot reused is a low-numbered one. `kc` reproduces all of this: a
-`kc rm item` produces a file byte-identical to what
-`security delete-generic-password` produces from the same input.
-
-### Blob versions and signatures
-
-Apple keychains use more than one blob version. Keychains written by Apple's
-tools commonly use `0x100` for legacy files and `0x200` for partition-aware
-files. The blob version determines the signature algorithm:
-
-| Version | Signature |
-| --- | --- |
-| `0x100` | Legacy BSafe-compatible HMAC behavior |
-| `0x101`, `0x200` | HMAC-SHA1 |
-
-Apple's `dbcrypto.cpp` selects the legacy algorithm only for `0x100`. A blob
-must therefore be signed according to its declared version.
-
-### Encryption
-
-The container specification does not describe all cryptographic details. The
-implementation follows Apple's published `ssblob.h`, `dbcrypto.cpp`, and
-`HmacSha1Legacy.c` sources and is checked against keychains produced by macOS.
+Common exit statuses are stable:
 
 ```text
-password
-  └─ PBKDF2-HMAC-SHA1(salt, 1000 iterations, 24 bytes) → master key
-
-master key
-  └─ 3DES-EDE3-CBC(DbBlob.iv) → encryption key (24) + signing key (20)
-
-encryption key
-  └─ unwrap(KeyBlob) → item key (24)
-
-item key
-  └─ 3DES-EDE3-CBC(ssgp.iv) → item secret
+0   success
+44  no item matched
+45  incorrect keychain password
+46  duplicate item
+2   command-line or other operational error
 ```
 
-Each item stores its encrypted secret in an `ssgp` payload containing a
-four-byte magic value, a 16-byte label, an eight-byte IV, and ciphertext. The
-label identifies the symmetric-key record containing that item's wrapped key.
+## Development
 
-Apple's custom key wrapping uses two CBC passes with a byte reversal between
-them:
-
-```text
-inner = 3DES-CBC(db key, iv, descriptive_data_length(0) || item key)
-blob  = 3DES-CBC(db key, MAGIC_CMS_IV, reverse(iv || inner))
+```sh
+cargo test --workspace --all-targets
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+mise run verify
 ```
 
-The `ssgp` payload carries its own IV. Its label matches the `Label` attribute
-of the key record that protects it, forming the link between the item and its
-key.
-
-Version `0x100` blobs use Apple's legacy HMAC behavior for compatibility. The
-implementation reproduces that behavior when the version requires it; later
-blob versions use standard HMAC-SHA1.
-
-### Indexes
-
-Each table ends with an index region:
-
-```text
-region := size, count, count × index offset
-index  := size, id, kind, attribute count, attribute ids,
-          entry count, entry offsets, record numbers, entries
-entry  := payload size, key values
-```
-
-Offsets are relative to the table. Entries are sorted by key, and the
-record-number array follows the same order. Because inserting a record changes
-table-relative offsets, `kc` rebuilds index regions from records whenever it
-writes the database.
-
-Unique-index attributes must be present even when their values are empty. For
-example, an internet-password item without a port stores `port = 0` and an
-empty path. This matches the records written by macOS and keeps the item
-represented in the relation's unique index.
-
-## Evidence and interoperability testing
-
-The implementation combines three sources of evidence:
-
-- the dtformats container specification;
-- Apple's published source and CSSM/CDSA headers; and
-- byte-level comparison with keychains written by macOS.
-
-The test suite checks, among other things:
-
-- byte-identical parsing and serialization of existing keychains;
-- preservation of record slots, free-list links, unknown fields, and ACLs;
-- signature selection by blob version;
-- schema-defined attribute order and naming;
-- key derivation, wrapping, and secret decryption;
-- index reconstruction and ordering;
-- duplicate detection through relation unique indexes;
-- identity records and on-demand relation creation;
-- byte-identical agreement with `security delete-generic-password` for deletes
-  at the first, middle, and last slot;
-- in-place updates, password changes, settings changes, ACL rewrites, copies,
-  and certificate and identity deletion, each read back with Apple's tool; and
-- interoperability in both directions with Apple's `security` tool.
-
-Unknown values are named accordingly—for example, `free_list_head` and
-`AclEntry::subject_words`—and preserved rather than inferred.
-
-### Running the tests
-
-```bash
-cargo test -p kc-cli
-cargo test -p kc-cli --features trust-apps
-cargo test -p keychain-rs
-```
-
-The suite covers keychains created by both `kc` and `security`. System-generated
-fixtures are created during the test run instead of being committed as binary
-files. Tests that require `security` skip when it is unavailable.
-
-`tests/keychain_interop.rs` provides the principal end-to-end check: it creates
-and updates keychains with `kc`, then requires Apple's tool to unlock, search,
-read, and update them.
-
-To extract the schema from another macOS version:
-
-```bash
-security create-keychain -p x /tmp/fresh.keychain
-python3 ../keychain/xtask/extract-schema.py /tmp/fresh.keychain > ../keychain/src/apple_schema.rs
-```
-
-## Security considerations
-
-The legacy keychain format uses cryptography that is weak by current standards:
-PBKDF2-HMAC-SHA1 with 1,000 iterations protects 3DES key material. Anyone who
-obtains a keychain file can attempt password guesses offline. Use a strong,
-random password and protect the file as secret material.
-
-Additional considerations:
-
-- `kc` creates files with mode `0600` and preserves the mode of existing files.
-- 3DES and SHA-1 are properties of the format and are retained for
-  interoperability.
-- Secret buffers are cleared when dropped where supported by the implementation.
-- Passing an item secret with `-w` exposes it through process arguments; prefer
-  an interactive prompt or standard input.
-- `kc` preserves ACL forms it does not model instead of rewriting them, and
-  `kc trust` refuses to rewrite an ACL it could not parse rather than replacing
-  it with a canonical one.
-- `kc export key` and `kc export identity` write private key material; the file
-  they create is mode `0600`, and an existing file's mode is taken down to
-  `0600` rather than inherited.
-- Direct file access bypasses `securityd` and therefore bypasses its ACL
-  enforcement. Anyone with both the file and its password can decrypt its
-  secrets.
-
-## A running `securityd` caches what it has opened
-
-`kc` replaces a keychain by writing a temporary file and renaming it, which is
-atomic but changes the file's inode. A `securityd` that already has that path
-open keeps serving the version it read: after `kc passwd`, `security` may still
-unlock with the *old* password, and after `kc rm` it may still return a deleted
-item — until something makes it re-open the file.
-
-```bash
-security lock-keychain ~/demo.keychain     # before the change, if it may be cached
-kc passwd ~/demo.keychain
-security unlock-keychain ~/demo.keychain   # after
-```
-
-Two related macOS behaviours are worth knowing, both established by experiment:
-`security unlock-keychain` on an **already unlocked** keychain returns success
-without checking the password at all, so verifying a rotation means locking
-first; and `security show-keychain-info` prints to standard error, not standard
-output.
-
-## Access control
-
-An item's key blob contains an owner entry and authorization entries. `kc`
-supports both unrestricted and application-restricted forms:
-
-```bash
-kc add generic -a u -s svc ~/k.keychain
-kc add generic -a u -s svc -T /usr/bin/security ~/k.keychain
-kc add generic -a u -s svc \
-  -T /usr/bin/security \
-  -T /bin/ls \
-  ~/k.keychain
-```
-
-A restricted entry stores one subject block per application:
-
-```text
-subject type 116, then for each application:
-  20-byte legacy CDSA code hash
-  binary path
-  designated requirement
-```
-
-When built with `--features trust-apps`, `-T` obtains the application's
-designated requirement with
-[`macho-codesign`](https://github.com/bryanmatteson/macho). A requirement can
-also be supplied explicitly:
-
-```bash
-csreq -r='identifier "com.example.app" and anchor apple' -b /tmp/req.bin
-kc add generic -a u -s svc \
-  --trust-requirement '/Applications/App.app=/tmp/req.bin' \
-  ~/k.keychain
-```
-
-The requirement stored in the ACL matches the application's signed designated
-requirement. The accompanying 20-byte value is a legacy CDSA code hash rather
-than the modern `cdhash`. Testing confirms that macOS accepts a zero value on
-the allowed access path, so `kc` uses zeros instead of synthesizing an
-unsupported value.
-
-macOS applies the application restriction to the six-tag authorization entry
-(`24, 28, 37, 38, 59, 115`) while leaving the single-tag entry (`35`)
-unrestricted. `kc` follows that structure when generating restricted ACLs.
-
-These ACLs govern access through `securityd`. They do not restrict `kc`
-itself, because `kc` decrypts the database directly.
-
-## Source layout
-
-```text
-src/bin/kc.rs          command-line interface (uses keychain-rs)
-```
-
-Format internals live in [`keychain-rs`](../keychain/README.md).
-
+The release order is `keychain-rs` first, then `kc-cli`.
 
 ## License
 
-MIT. The format documentation draws on the GFDL-licensed dtformats
-specification and Apple's APSL-licensed source. No code from either is included.
+MIT

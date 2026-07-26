@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+## kc-cli 0.6.0
+
+Breaking CLI changes:
+
+- Replace `show`, `find`, and `ls` with one multi-item `get` command and typed
+  ANDed predicates. Add comparisons, SQL-LIKE wildcards, Unicode case and
+  diacritic modifiers, ordered `-o` projections, full detail, JSON, and guarded
+  secret projections.
+- Add `-u, --distinct` for stable, typed deduplication of projected row tuples.
+- Replace selector-based item updates with
+  `kc set NAME=VALUE... --for EXPRESSION`. Add atomic reference pipelines with
+  `kc get -o @ref | kc set ... --for -`; opaque references bind the keychain,
+  database revision, record class, and record number.
+- Add the canonical assignment form
+  `kc add class=generic account=... service=...`, with class-aware validation.
+- Add `KC_DEFAULT_KEYCHAIN` between an explicit keychain and the saved default,
+  and report the effective default and source from `kc config show`.
+- Standardize direct keychain passwords on `-P`; `--port` is no longer
+  overloaded with a password short.
+
+## keychain-rs 0.2.6
+
+- Add the public `Expression`, `Predicate`, `Comparison`, and `MatchOptions`
+  query model plus `KeychainFile::select`.
+- Add opaque, revision-bound `ItemRef` values with encode/decode, inspection
+  accessors, and `KeychainFile::item_ref` / `resolve_ref`.
+- Add typed dates, numbers, booleans, four-character codes, SQL-LIKE matching,
+  and Unicode case/diacritic normalization to library queries.
+
 ## kc-cli 0.5.0
 
 Breaking CLI change:
