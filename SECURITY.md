@@ -4,7 +4,7 @@ These tools handle passwords and keychain material. Treat reports seriously.
 
 ## Supported versions
 
-- **`keychain-rs`** / **`kc-cli`**: the latest published crates.io release of each
+- **`keychain-db`** / **`kc-cli`**: the latest published crates.io release of each
   is supported for security fixes.
 - **`apwh`**: the latest commit on `main` in this repository (not published to
   crates.io).
@@ -26,7 +26,7 @@ coordinated disclosure timeline can be agreed.
 
 ## Scope notes
 
-- **`keychain-rs` / `kc`** read and write keychain files directly. Anyone with
+- **`keychain-db` / `kc`** read and write keychain files directly. Anyone with
   filesystem access to a keychain file and its password can decrypt its contents
   — that is by design, not a vulnerability in the format parser.
 - **`apwh`** talks to Apple's Passwords helper. Issues that only reproduce because

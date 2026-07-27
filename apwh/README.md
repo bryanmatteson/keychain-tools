@@ -4,7 +4,7 @@ A Rust CLI and background service for Apple Passwords (iCloud Keychain) on macOS
 built on the same native-messaging helper that browser extensions use.
 
 This is one of three crates in the repository. The other two are
-[`keychain-rs`](../keychain/README.md) and [`kc-cli`](../kc-cli/README.md),
+[`keychain-db`](../keychain/README.md) and [`kc-cli`](../kc-cli/README.md),
 which read and write `.keychain` files directly and share no code with this
 one.
 

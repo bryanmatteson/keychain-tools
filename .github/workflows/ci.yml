@@ -48,5 +48,5 @@ jobs:
 
       - name: Package crates
         run: |
-          cargo package -p keychain-rs --allow-dirty
+          cargo package -p keychain-db --allow-dirty
           cargo package -p kc-cli --allow-dirty

@@ -16,7 +16,7 @@
 //! see `README.md` for the wire details and where this deliberately diverges.
 //!
 //! The on-disk keychain format is a separate crate,
-//! [`keychain-rs`](https://crates.io/crates/keychain-rs), which shares no code
+//! [`keychain-db`](https://crates.io/crates/keychain-db), which shares no code
 //! with this one.
 
 pub mod client;

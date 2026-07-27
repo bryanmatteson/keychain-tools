@@ -1,5 +1,5 @@
 # Three crates that share a repository: `apwh` talks to Apple's Passwords helper
-# over native messaging; `keychain-rs` (in `keychain/`) and `kc-cli` read and
+# over native messaging; `keychain-db` (in `keychain/`) and `kc-cli` read and
 # write the on-disk keychain format (library and CLI). `apwh` shares no code
 # with the other two.
 [workspace]

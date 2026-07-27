@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## kc-cli 0.6.1
+
+- Switch the published library dependency from `keychain-rs` to
+  `keychain-db`. The CLI and its command surface are unchanged.
+
+## keychain-db 0.2.6
+
+- Continue the `keychain-rs 0.2.6` API under its canonical package name,
+  `keychain-db`. The Rust library target remains `keychain`, so imports are
+  unchanged.
+
 ## kc-cli 0.6.0
 
 Breaking CLI changes:

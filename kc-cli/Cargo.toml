@@ -11,14 +11,14 @@
     readme                 = "README.md"
     repository.workspace   = true
     rust-version.workspace = true
-    version                = "0.6.0"
+    version                = "0.6.1"
 
 [[bin]]
     name = "kc"
     path = "src/bin/kc.rs"
 
 [dependencies]
-    keychain-rs = { version = "0.2.6", path = "../keychain" }
+    keychain-db = { version = "0.2.6", path = "../keychain" }
 
     # CLI
     clap.workspace          = true
@@ -34,4 +34,4 @@
 [features]
     default = []
     # Resolve `-T <app>` by reading the app's designated requirement.
-    trust-apps = ["keychain-rs/trust-apps"]
+    trust-apps = ["keychain-db/trust-apps"]

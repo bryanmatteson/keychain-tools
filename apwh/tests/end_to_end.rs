@@ -385,6 +385,11 @@ fn a_helper_that_exits_is_reported_and_takes_the_service_down() {
 #[test]
 fn sigterm_removes_the_socket_and_kills_the_helper() {
     let harness = Harness::normal("sigterm");
+    // The startup probe inherits the fake helper's PID-file environment and
+    // can briefly leave its own, already-dead PID behind. A completed request
+    // proves the real helper has started and replaced that file.
+    let output = harness.apwh(&["capabilities"]);
+    assert!(output.status.success(), "{}", stderr(&output));
     let helper_pid = harness.helper_pid();
     assert!(process_alive(helper_pid));
 

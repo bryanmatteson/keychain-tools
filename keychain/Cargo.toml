@@ -2,12 +2,12 @@
     authors.workspace      = true
     categories             = ["cryptography", "os::macos-apis", "parsing"]
     description            = "Read and write macOS keychain files without the Security framework"
-    documentation          = "https://docs.rs/keychain-rs"
+    documentation          = "https://docs.rs/keychain-db"
     edition.workspace      = true
     homepage.workspace     = true
     keywords               = ["keychain", "macos", "passwords", "security"]
     license.workspace      = true
-    name                   = "keychain-rs"
+    name                   = "keychain-db"
     readme                 = "README.md"
     repository.workspace   = true
     rust-version.workspace = true

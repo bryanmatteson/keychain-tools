@@ -1,15 +1,20 @@
-# keychain-rs — macOS keychain files without the Security framework
+# keychain-db — macOS keychain files without the Security framework
 
 Rust library for reading and writing macOS `.keychain` / `.keychain-db`
 databases directly: no `securityd`, no Security framework, no entitlements.
+
+The package is published as `keychain-db`; its Rust library target remains
+`keychain`, so existing `use keychain::...` imports do not change. Versions
+through 0.2.6 were also published under the former package name `keychain-rs`;
+future releases use `keychain-db`.
 
 The companion CLI is [`kc-cli`](https://crates.io/crates/kc-cli) (binary `kc`).
 
 ```toml
 [dependencies]
-keychain-rs = "0.2"
+keychain-db = "0.2"
 # optional: resolve ACL trusted apps from code signatures
-# keychain-rs = { version = "0.2", features = ["trust-apps"] }
+# keychain-db = { version = "0.2", features = ["trust-apps"] }
 ```
 
 ```rust
@@ -293,8 +298,8 @@ Values that remain unknown are named accordingly — for example
 ### Running the tests
 
 ```bash
-cargo test -p keychain-rs
-cargo test -p keychain-rs --features trust-apps
+cargo test -p keychain-db
+cargo test -p keychain-db --features trust-apps
 ```
 
 The suite covers keychains created by both `kc` and `security`. System-generated

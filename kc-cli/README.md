@@ -5,7 +5,7 @@ not call the Security framework, require entitlements, or depend on a running
 `securityd`. The files remain interoperable with Keychain Access and
 `/usr/bin/security`.
 
-The Rust library is [`keychain-rs`](../keychain/README.md). This crate provides
+The Rust library is [`keychain-db`](../keychain/README.md). This crate provides
 the `kc` command.
 
 ## Install
@@ -306,7 +306,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 mise run verify
 ```
 
-The release order is `keychain-rs` first, then `kc-cli`.
+The release order is `keychain-db` first, then `kc-cli`.
 
 ## License
 

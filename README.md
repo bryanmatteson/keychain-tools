@@ -5,14 +5,17 @@ Rust tools for macOS passwords and keychain files. They share a repository;
 
 | | |
 | --- | --- |
-| [**`keychain-rs`**](keychain/README.md) | Library for the on-disk `.keychain` format: no `securityd`, no Security framework, no entitlements. Published to crates.io. |
-| [**`kc-cli`**](kc-cli/README.md) | CLI (`kc`) built on `keychain-rs`. Creates, reads, and writes keychains Apple's `security` accepts. Published to crates.io. |
+| [**`keychain-db`**](keychain/README.md) | Library for the on-disk `.keychain` format: no `securityd`, no Security framework, no entitlements. Published to crates.io. |
+| [**`kc-cli`**](kc-cli/README.md) | CLI (`kc`) built on `keychain-db`. Creates, reads, and writes keychains Apple's `security` accepts. Published to crates.io. |
 | [**`apwh`**](apwh/README.md) | Apple Passwords (iCloud Keychain) via the native-messaging helper discovered from Chrome/Firefox's manifest and launched over stdio. GitHub only — not on crates.io. Blocked on macOS 26 by Apple's parent launch constraint. |
+
+`keychain-db` supersedes the former crates.io package name `keychain-rs`.
+The Rust library target is still named `keychain`.
 
 ## Install
 
 ```bash
-cargo add keychain-rs          # library
+cargo add keychain-db          # library
 cargo install kc-cli           # installs the `kc` binary
 ```
 
@@ -47,7 +50,7 @@ cargo test --workspace --all-targets --all-features --locked
 cargo test --workspace --doc --all-features --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
 cargo build --workspace --release --all-features --locked
-cargo package -p keychain-rs --allow-dirty
+cargo package -p keychain-db --allow-dirty
 cargo package -p kc-cli --allow-dirty
 ```
 
