@@ -259,6 +259,13 @@ impl PasswordSource {
         Ok(password)
     }
 
+    /// True when resolving the password would consume standard input.
+    fn reads_stdin(&self) -> bool {
+        self.password_file
+            .as_ref()
+            .is_some_and(|path| path.as_os_str() == "-")
+    }
+
     /// The password, or `None` when the command has nothing to decrypt.
     fn resolve_optional(&self, required: bool) -> Result<Option<String>> {
         if !required && !self.is_explicit() {
@@ -433,12 +440,24 @@ enum Command {
     /// Change every item selected by a query or reference stream
     Set {
         /// NAME=VALUE assignments to apply
-        #[arg(required = true, value_name = "ASSIGNMENT")]
+        #[arg(value_name = "ASSIGNMENT")]
         assignments: Vec<String>,
 
         /// Query expression, or `-` to consume `kc get -o @ref` from stdin
         #[arg(long = "for", required = true, value_name = "EXPRESSION|-")]
         selection: String,
+
+        /// Replace the item secret; read from the terminal or stdin when the
+        /// value is omitted
+        #[arg(short = 'w', long = "secret", value_name = "SECRET", num_args = 0..=1)]
+        secret: Option<Option<String>>,
+
+        /// Permit a secret change to affect more than one item
+        #[arg(long, action = ArgAction::SetTrue, requires = "secret")]
+        all: bool,
+
+        #[command(flatten)]
+        password: PasswordSource,
 
         /// Override the environment or configured default keychain
         #[arg(long, value_name = "KEYCHAIN")]
@@ -1425,8 +1444,19 @@ fn run(cli: &Cli) -> Result<()> {
         Command::Set {
             assignments,
             selection,
+            secret,
+            all,
+            password,
             keychain,
-        } => set_query_command(cli, assignments, selection, keychain),
+        } => set_query_command(
+            cli,
+            assignments,
+            selection,
+            secret,
+            *all,
+            password,
+            keychain,
+        ),
 
         Command::Rm { kind } => rm_command(cli, kind),
 
@@ -2907,11 +2937,34 @@ fn set_query_command(
     cli: &Cli,
     assignments: &[String],
     selection: &str,
+    secret: &Option<Option<String>>,
+    all: bool,
+    password: &PasswordSource,
     requested_keychain: &Option<PathBuf>,
 ) -> Result<()> {
     let changes = changes_from_assignments(assignments)?;
-    if changes.is_empty() {
-        return Err(Error::other("nothing to change"));
+    if changes.is_empty() && secret.is_none() {
+        return Err(Error::other(
+            "nothing to change; pass NAME=VALUE assignments or -w, --secret",
+        ));
+    }
+    // `--for -` gives stdin to the reference stream, so nothing else may read it.
+    if selection == "-" {
+        if password.reads_stdin() {
+            return Err(Error::other(
+                "`--for -` reads item references from stdin; name a password file instead of `-`",
+            ));
+        }
+        if matches!(secret, Some(None)) {
+            return Err(Error::other(
+                "`--for -` reads item references from stdin; pass the new secret as `-w SECRET`",
+            ));
+        }
+        if secret.is_some() && !password.is_explicit() {
+            return Err(Error::other(
+                "`--for -` reads item references from stdin; name the keychain password with -P, -E, or -F",
+            ));
+        }
     }
 
     let references = if selection == "-" {
@@ -2948,6 +3001,19 @@ fn set_query_command(
     }
 
     let mut file = KeychainFile::open(&keychain)?;
+    // Attributes are stored in the clear, so changing them needs no key
+    // material; a named password is still verified rather than ignored.
+    // Re-sealing a secret needs the item key, so there the password is required.
+    if secret.is_some() {
+        authorize_secret_access(cli, &keychain, "change item secrets")?;
+        let password = password.resolve(false)?;
+        file.unlock(password.as_bytes())?;
+    } else if password.is_explicit()
+        && let Some(password) = password.resolve_optional(false)?
+    {
+        file.unlock(password.as_bytes())?;
+    }
+
     let targets = if let Some(references) = references {
         let mut seen = std::collections::BTreeSet::new();
         let mut targets = Vec::with_capacity(references.len());
@@ -2990,9 +3056,30 @@ fn set_query_command(
             .collect::<Result<Vec<_>>>()?
     };
 
+    // Read the secret only once the target set is known, so a query that is too
+    // broad fails before anything is typed or consumed from stdin.
+    let secret = match secret {
+        Some(flag) => {
+            if targets.len() > 1 && !all {
+                return Err(Error::other(format!(
+                    "{} items match a secret change; narrow the query or pass --all",
+                    targets.len()
+                )));
+            }
+            Some(item_secret(flag)?)
+        }
+        None => None,
+    };
+
     let timestamp = now_timestamp();
     for (record_type, number, _) in &targets {
-        file.update_item(*record_type, *number, &changes, None, &timestamp)?;
+        file.update_item(
+            *record_type,
+            *number,
+            &changes,
+            secret.as_deref().map(str::as_bytes),
+            &timestamp,
+        )?;
     }
     file.save(&keychain)?;
 
@@ -3025,7 +3112,12 @@ fn changes_from_assignments(assignments: &[String]) -> Result<ItemChanges> {
             )));
         }
         match canonical.as_str() {
-            "class" | "record" | "has-secret" | "secret" | "cdat" | "mdat" => {
+            "secret" => {
+                return Err(Error::other(format!(
+                    "{name} is not an attribute; replace it with -w, --secret"
+                )));
+            }
+            "class" | "record" | "has-secret" | "cdat" | "mdat" => {
                 return Err(Error::other(format!("{name} cannot be changed")));
             }
             "PrintName" => changes.label = Some(value.to_string()),

@@ -156,6 +156,395 @@ fn password_sources_work_for_secret_projections() {
     assert!(String::from_utf8_lossy(&exclusive.stderr).contains("cannot be used with"));
 }
 
+/// `kc set` changes attributes, which are plaintext, so it needs no key
+/// material. It still accepts the password sources every other command takes:
+/// a named password is verified before anything is written, rather than
+/// ignored.
+#[test]
+fn set_accepts_the_same_password_sources_as_every_other_command() {
+    let dir = TempDir::new("options-set-password");
+    let keychain = populated(&dir, "set-pw");
+    let password_file = dir.join("pw.txt");
+    std::fs::write(&password_file, "set-pw\n").expect("write password file");
+    let password_file = password_file.to_str().unwrap();
+
+    let comment = |dir: &str| {
+        kc_ok(
+            &[
+                "get",
+                "class:generic",
+                "account:alice",
+                "-o",
+                "comment",
+                "--keychain",
+                dir,
+            ],
+            None,
+        )
+    };
+
+    // -P, -E, and -F all reach the same place.
+    kc_ok(
+        &[
+            "set",
+            "comment=via -P",
+            "--for",
+            "class:generic account:alice",
+            "-P",
+            "set-pw",
+            "--keychain",
+            &keychain,
+        ],
+        None,
+    );
+    assert_eq!(comment(&keychain), "via -P");
+
+    let with_env = kc_with_env(
+        &[
+            "set",
+            "comment=via -E",
+            "--for",
+            "class:generic account:alice",
+            "-E",
+            "KC_TEST_SET_PW",
+            "--keychain",
+            &keychain,
+        ],
+        &[("KC_TEST_SET_PW", "set-pw\n")],
+    );
+    assert!(with_env.status.success());
+    assert_eq!(comment(&keychain), "via -E");
+
+    kc_ok(
+        &[
+            "set",
+            "comment=via -F",
+            "--for",
+            "class:generic account:alice",
+            "-F",
+            password_file,
+            "--keychain",
+            &keychain,
+        ],
+        None,
+    );
+    assert_eq!(comment(&keychain), "via -F");
+
+    // Attributes are plaintext, so omitting the password still works.
+    kc_ok(
+        &[
+            "set",
+            "comment=via nothing",
+            "--for",
+            "class:generic account:alice",
+            "--keychain",
+            &keychain,
+        ],
+        None,
+    );
+    assert_eq!(comment(&keychain), "via nothing");
+
+    // A wrong password is refused, and nothing is written.
+    let wrong = kc(
+        &[
+            "set",
+            "comment=must not appear",
+            "--for",
+            "class:generic account:alice",
+            "-P",
+            "not-the-password",
+            "--keychain",
+            &keychain,
+        ],
+        None,
+    );
+    assert_eq!(wrong.status.code(), Some(45));
+    assert_eq!(comment(&keychain), "via nothing");
+
+    // `--for -` owns stdin, so a password cannot also be read from it.
+    let collision = kc(
+        &[
+            "set",
+            "comment=x",
+            "--for",
+            "-",
+            "-F",
+            "-",
+            "--keychain",
+            &keychain,
+        ],
+        None,
+    );
+    assert!(!collision.status.success());
+    assert!(
+        String::from_utf8_lossy(&collision.stderr).contains("reads item references from stdin"),
+        "unexpected: {}",
+        String::from_utf8_lossy(&collision.stderr)
+    );
+
+    // The reference pipeline takes a password on the command line.
+    let reference = kc_ok(
+        &[
+            "get",
+            "class:generic",
+            "account:alice",
+            "-o",
+            "@ref",
+            "--keychain",
+            &keychain,
+        ],
+        None,
+    );
+    kc_ok(
+        &[
+            "set",
+            "comment=via @ref",
+            "--for",
+            "-",
+            "-P",
+            "set-pw",
+            "--keychain",
+            &keychain,
+        ],
+        Some(&reference),
+    );
+    assert_eq!(comment(&keychain), "via @ref");
+}
+
+/// Replacing a secret re-seals it under the item's existing key, so unlike an
+/// attribute change it genuinely needs the keychain password.
+#[test]
+fn set_replaces_secrets_and_needs_the_password_to_do_it() {
+    let dir = TempDir::new("options-set-secret");
+    let keychain = populated(&dir, "set-pw");
+
+    let secret_of = |account: &str| {
+        kc_ok(
+            &[
+                "get",
+                "class:generic",
+                &format!("account:{account}"),
+                "-o",
+                "secret",
+                "-P",
+                "set-pw",
+                "--keychain",
+                &keychain,
+            ],
+            None,
+        )
+    };
+
+    kc_ok(
+        &[
+            "set",
+            "-w",
+            "rotated",
+            "--for",
+            "class:generic account:alice",
+            "-P",
+            "set-pw",
+            "--keychain",
+            &keychain,
+        ],
+        None,
+    );
+    assert_eq!(secret_of("alice"), "rotated");
+
+    // Attributes are plaintext, but key material is not: no password, no change.
+    let unauthenticated = kc(
+        &[
+            "set",
+            "-w",
+            "must-not-apply",
+            "--for",
+            "class:generic account:alice",
+            "--keychain",
+            &keychain,
+        ],
+        None,
+    );
+    assert_eq!(
+        unauthenticated.status.code(),
+        Some(45),
+        "unexpected: {}{}",
+        String::from_utf8_lossy(&unauthenticated.stdout),
+        String::from_utf8_lossy(&unauthenticated.stderr)
+    );
+    assert_eq!(secret_of("alice"), "rotated");
+
+    // A secret is not an attribute, and the error says where to go instead.
+    let assigned = kc(
+        &[
+            "set",
+            "secret=nope",
+            "--for",
+            "class:generic account:alice",
+            "--keychain",
+            &keychain,
+        ],
+        None,
+    );
+    assert!(!assigned.status.success());
+    assert!(
+        String::from_utf8_lossy(&assigned.stderr).contains("-w, --secret"),
+        "unexpected: {}",
+        String::from_utf8_lossy(&assigned.stderr)
+    );
+
+    // One secret must not land on many items by accident.
+    kc_ok(
+        &[
+            "add",
+            "class=generic",
+            "account=carol",
+            "service=other",
+            "-w",
+            "carol-secret",
+            "--keychain",
+            &keychain,
+        ],
+        Some("set-pw"),
+    );
+    let broad = kc(
+        &[
+            "set",
+            "-w",
+            "shared",
+            "--for",
+            "class:generic",
+            "-P",
+            "set-pw",
+            "--keychain",
+            &keychain,
+        ],
+        None,
+    );
+    assert!(!broad.status.success());
+    assert!(
+        String::from_utf8_lossy(&broad.stderr).contains("pass --all"),
+        "unexpected: {}",
+        String::from_utf8_lossy(&broad.stderr)
+    );
+    assert_eq!(secret_of("alice"), "rotated");
+    assert_eq!(secret_of("carol"), "carol-secret");
+
+    // Said deliberately, it applies to every match.
+    kc_ok(
+        &[
+            "set",
+            "-w",
+            "shared",
+            "--for",
+            "class:generic",
+            "--all",
+            "-P",
+            "set-pw",
+            "--keychain",
+            &keychain,
+        ],
+        None,
+    );
+    assert_eq!(secret_of("alice"), "shared");
+    assert_eq!(secret_of("carol"), "shared");
+
+    // The secret can come from stdin rather than argv.
+    kc_ok(
+        &[
+            "set",
+            "-w",
+            "--for",
+            "class:generic account:alice",
+            "-P",
+            "set-pw",
+            "--keychain",
+            &keychain,
+        ],
+        Some("from-stdin"),
+    );
+    assert_eq!(secret_of("alice"), "from-stdin");
+}
+
+/// `--for -` owns stdin, so a secret change through a reference pipeline has to
+/// take both the secret and the password from somewhere else.
+#[test]
+fn a_secret_change_through_a_reference_pipeline_cannot_share_stdin() {
+    let dir = TempDir::new("options-set-secret-refs");
+    let keychain = populated(&dir, "set-pw");
+    let reference = kc_ok(
+        &[
+            "get",
+            "class:generic",
+            "account:alice",
+            "-o",
+            "@ref",
+            "-P",
+            "set-pw",
+            "--keychain",
+            &keychain,
+        ],
+        None,
+    );
+
+    let cases: [(&[&str], &str); 2] = [
+        (
+            &["set", "-w", "--for", "-", "-P", "set-pw"],
+            "pass the new secret as `-w SECRET`",
+        ),
+        (
+            &["set", "-w", "piped", "--for", "-"],
+            "name the keychain password with -P, -E, or -F",
+        ),
+    ];
+    for (arguments, expected) in cases {
+        let mut arguments = arguments.to_vec();
+        arguments.extend_from_slice(&["--keychain", &keychain]);
+        let output = kc(&arguments, Some(&reference));
+        assert!(
+            !output.status.success(),
+            "expected a refusal: {arguments:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected),
+            "unexpected: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // Named explicitly, both fit alongside the reference stream.
+    kc_ok(
+        &[
+            "set",
+            "-w",
+            "through-the-pipeline",
+            "--for",
+            "-",
+            "-P",
+            "set-pw",
+            "--keychain",
+            &keychain,
+        ],
+        Some(&reference),
+    );
+    assert_eq!(
+        kc_ok(
+            &[
+                "get",
+                "class:generic",
+                "account:alice",
+                "-o",
+                "secret",
+                "-P",
+                "set-pw",
+                "--keychain",
+                &keychain,
+            ],
+            None,
+        ),
+        "through-the-pipeline"
+    );
+}
+
 #[test]
 fn password_flags_and_generation_follow_the_contract() {
     let dir = TempDir::new("options-passwords");

@@ -93,6 +93,47 @@ fn security_reads_item_metadata_kc_updated() {
     let _ = security(&["delete-keychain", &keychain]);
 }
 
+/// Replacing a secret re-seals it under the item's existing key with a fresh
+/// IV. The proof that the re-seal is right is that `securityd` — not this code
+/// — reads the new value back out of an item `security` itself wrote.
+#[test]
+fn security_reads_a_secret_kc_replaced() {
+    if !security_available() {
+        eprintln!("skipping: /usr/bin/security is unavailable");
+        return;
+    }
+    let dir = TempDir::new("mutate-secret");
+    let path = populated_keychain(&dir, "k.keychain", "pw");
+    let keychain = path.to_str().expect("utf-8 path");
+
+    kc_ok(
+        &[
+            "set",
+            "-w",
+            "rotated-by-kc",
+            "--for",
+            "class:generic account:alice",
+            "-P",
+            "pw",
+            "--keychain",
+            keychain,
+        ],
+        None,
+    );
+
+    security_ok(&["unlock-keychain", "-p", "pw", keychain]);
+    assert_eq!(
+        security_ok(&["find-generic-password", "-a", "alice", "-w", keychain]),
+        "rotated-by-kc"
+    );
+    // The item it did not touch keeps the secret security stored.
+    assert_eq!(
+        security_ok(&["find-generic-password", "-a", "carol", "-w", keychain]),
+        "third-one"
+    );
+    let _ = security(&["delete-keychain", keychain]);
+}
+
 #[test]
 fn security_updates_an_item_that_kc_then_reads() {
     if !security_available() {

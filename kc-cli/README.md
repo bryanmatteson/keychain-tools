@@ -191,13 +191,42 @@ kc set label=updated comment="rotated in 2026" \
   --for 'class:internet account[c]:bryan%'
 ```
 
-The query must be non-empty. `class`, `record`, `secret`, creation time, and
-modification time cannot be changed. Attributes that define a relation's unique
-identity are rejected by the library; replacing those means deleting and
-adding an item.
+The query must be non-empty. `class`, `record`, creation time, and modification
+time cannot be changed. Attributes that define a relation's unique identity are
+rejected by the library; replacing those means deleting and adding an item.
+
+A secret is not an attribute, so it is replaced with `-w, --secret` rather than
+an assignment:
+
+```sh
+kc set -w 'new-secret' --for 'class:generic account:alice service:vpn'
+kc set -w --for 'class:generic account:alice'      # read it from stdin or prompt
+kc set kind="api key" -w 'new-secret' --for 'class:generic account:alice'
+```
+
+The new secret is re-sealed under the item's existing key, so unlike an
+attribute change this needs the keychain password and obeys the keychain's
+access policy — a `prompt` policy requires `--interactive`. Because one secret
+landing on many items is rarely intended, a query matching more than one item
+is refused unless `--all` is given.
 
 Updates are collected first, applied in memory, and saved once. A failure
 before the save leaves the file unchanged.
+
+Item attributes are stored in the clear, so changing only attributes needs no key
+material and the password is optional. When one is supplied it is verified before
+anything is written, and a wrong password fails with status `45` without touching
+the file:
+
+```sh
+kc get class:internet 'account[c]:bryan%' -o @ref |
+  kc set label=updated --for - -P "$(secret-tool lookup kc login)"
+```
+
+Because `--for -` gives stdin to the reference stream, nothing else may read it:
+`-F -` is refused, and a secret change through a pipeline must name both the
+secret and the password (`-w SECRET` with `-P`, `-E`, or `-F`) rather than
+falling back to stdin.
 
 ## Password input
 
