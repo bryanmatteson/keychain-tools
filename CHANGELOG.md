@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## kc-cli 0.6.2
+
+- Add `kc set -w, --secret`, which replaces an item secret in place. The new
+  secret is re-sealed under the item's existing key with a fresh IV, so it
+  requires the keychain password and obeys the keychain access policy. The value
+  may be omitted to read it from stdin or a prompt. A query matching more than
+  one item is refused unless `--all` is given, so one secret cannot land on many
+  items by accident. `secret=VALUE` remains rejected as an assignment and now
+  points at the flag.
+- Accept `-P`, `-E`, and `-F` on `kc set`, which previously rejected the
+  password sources every other command takes. Attribute-only changes still need
+  no password; a supplied one is verified before anything is written, and a
+  wrong password fails with status `45` leaving the file unchanged.
+- Refuse the inputs that would otherwise consume the `kc set --for -` reference
+  stream: `--password-file -`, a valueless `-w`, and an unnamed password
+  alongside a secret change.
+
 ## kc-cli 0.6.1
 
 - Switch the published library dependency from `keychain-rs` to
