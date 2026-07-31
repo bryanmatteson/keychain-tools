@@ -5,6 +5,39 @@ mod common;
 use common::*;
 use keychain::{ApplicationAccess, KeychainFile};
 
+/// The test helpers give every test its own `HOME`, so nothing a test does can
+/// reach the developer's real `~/.config/keychain.kdl`. `kc create` saves a
+/// keychain access policy, which is the operation that used to leak into it.
+#[test]
+fn a_saved_access_policy_lands_in_the_test_home_not_the_real_one() {
+    let real = std::env::var_os("HOME")
+        .map(|home| std::path::PathBuf::from(home).join(".config/keychain.kdl"));
+    let before = real.as_ref().and_then(|path| std::fs::read(path).ok());
+
+    let dir = TempDir::new("home-isolation");
+    let keychain = dir.join("policy.keychain-db");
+    let keychain = keychain.to_str().expect("utf-8 path");
+
+    // Unlike `kc`, this helper adds no `--no-access-policy`, so the create below
+    // really does save a policy somewhere.
+    let output = kc_with_env(&["create", "-P", "pw", keychain], &[]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let isolated = std::fs::read_to_string(kc_home().join(".config/keychain.kdl"))
+        .expect("the policy is saved under the test's own HOME");
+    assert!(isolated.contains(keychain), "unexpected: {isolated}");
+
+    let after = real.as_ref().and_then(|path| std::fs::read(path).ok());
+    assert_eq!(
+        before, after,
+        "a test wrote to the real ~/.config/keychain.kdl"
+    );
+}
+
 #[test]
 fn create_requires_an_output_even_when_a_default_is_configured() {
     let home = TempDir::new("create-output-home");

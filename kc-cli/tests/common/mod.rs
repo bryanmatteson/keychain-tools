@@ -39,7 +39,24 @@ impl TempDir {
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+        let _ = std::fs::remove_dir_all(kc_home());
     }
+}
+
+/// The `HOME` every `kc` invocation in these tests sees.
+///
+/// A test must never read or write the developer's real
+/// `~/.config/keychain.kdl`. `kc create` saves a keychain access policy there,
+/// which would otherwise accumulate entries naming temp paths that no longer
+/// exist, and let tests running in parallel race on one file. The path is
+/// per-thread and therefore per test; `kc` creates it only if the test stores
+/// configuration, so a test that stores none leaves nothing behind.
+pub fn kc_home() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "kc-test-home-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ))
 }
 
 pub fn security_available() -> bool {
@@ -136,6 +153,7 @@ pub fn kc(args: &[&str], password: Option<&str>) -> std::process::Output {
     // isolation. Opt those creates out of the new persisted prompt policy;
     // config tests invoke the binary directly and cover the secure default.
     let mut command = Command::new(kc_binary());
+    command.env("HOME", kc_home());
     if let Some(create) = args.iter().position(|argument| *argument == "create")
         && !args.contains(&"--no-access-policy")
     {
@@ -172,7 +190,11 @@ pub fn kc_with_env(args: &[&str], env: &[(&str, &str)]) -> std::process::Output 
     use std::process::Stdio;
 
     let mut command = Command::new(kc_binary());
-    command.args(args).stdin(Stdio::null());
+    // Applied first so a caller naming its own HOME still wins.
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .env("HOME", kc_home());
     for (name, value) in env {
         command.env(name, value);
     }
